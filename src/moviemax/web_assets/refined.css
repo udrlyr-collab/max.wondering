@@ -1,9 +1,8 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    max.wondering — Design Override Layer
-   Clean single-tone aesthetic. No gradients. Green ↑ / Red ↓ semantic color.
+   Sharp rectilinear. Monotone charcoal. Green ↑ / Red ↓ only.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── Palette Reset ──────────────────────────────────────────────────────── */
 :root {
   --page-gutter: clamp(18px, 2vw, 32px);
 
@@ -18,42 +17,71 @@
   --line: #d5d8d0;
   --line-strong: #b3b8ad;
 
-  /* Single accent: Warm charcoal with indigo undertone */
   --accent: #3d3d3d;
   --accent-bg: #f0f0ee;
 
-  /* Semantic: increase (green) */
   --up: #1a7a4c;
   --up-bg: #edf7f1;
   --up-line: #b6dcc5;
 
-  /* Semantic: decrease (red) */
   --down: #c0392b;
   --down-bg: #fdf0ee;
   --down-line: #ecc8c3;
 
-  /* Muted info accent */
   --blue: #3568a8;
   --blue-soft: #eef3f9;
   --blue-line: #bdd0e8;
   --blue-strong: #2b5690;
 
-  /* Warm amber for preparing states */
   --amber: #9a6817;
   --amber-soft: #faf4e8;
 
   --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
   --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
 
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
+  --radius-sm: 0;
+  --radius-md: 0;
+  --radius-lg: 0;
+}
+
+/* ── Kill ALL border-radius globally ────────────────────────────────────── */
+.target-rail,
+.empty-state,
+.metric-strip,
+.recent-panel,
+.operations-panel,
+.schedule-panel,
+.activity-filters,
+.activity-full-item,
+.modal,
+.selection-preview,
+.security-note,
+.token-callout,
+.poll-settings-feedback,
+.form-feedback,
+.history-list,
+.toast,
+.target-item,
+.target-glyph,
+.icon-button,
+.button,
+.worker-status,
+.filter-group,
+.filter-button,
+.watch-button,
+.state-pill,
+.threshold-editor,
+.count-badge,
+.chat-option,
+code,
+.booking-button,
+.activity-signal,
+.setup-steps li > span {
+  border-radius: 0 !important;
 }
 
 /* ── Global ─────────────────────────────────────────────────────────────── */
-html {
-  background: var(--canvas);
-}
+html { background: var(--canvas); }
 
 body {
   background: var(--canvas);
@@ -68,30 +96,28 @@ body {
 .target-rail {
   border: none;
   border-right: 1px solid var(--line);
-  border-radius: 0;
   background: var(--surface);
   color: var(--ink);
   box-shadow: none;
 }
 
-/* Brand */
 .product-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 0 6px 18px;
+  padding: 0 6px 16px;
   border-bottom: 1px solid var(--line);
 }
 
 .product-mark {
   display: grid;
   place-items: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 8px;
+  width: 34px;
+  height: 34px;
+  border-radius: 0 !important;
   background: var(--surface-strong);
   color: #fff;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 800;
   letter-spacing: -0.03em;
 }
@@ -106,7 +132,7 @@ body {
 
 .product-brand-copy strong {
   color: var(--ink-strong);
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 800;
   letter-spacing: -0.035em;
 }
@@ -119,9 +145,8 @@ body {
   letter-spacing: 0.06em;
 }
 
-/* Target list section heading */
 .target-heading {
-  padding: 18px 6px 12px;
+  padding: 16px 6px 10px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -137,7 +162,6 @@ body {
   border-color: var(--line);
   color: var(--ink);
   background: var(--surface);
-  border-radius: var(--radius-sm);
 }
 
 .target-rail .icon-button:hover:not(:disabled) {
@@ -145,17 +169,13 @@ body {
   border-color: var(--line-strong);
 }
 
-/* Target items */
-.target-list {
-  margin-top: 8px;
-}
+.target-list { margin-top: 6px; }
 
 .target-item {
-  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--ink);
   border: 1px solid transparent;
-  min-height: 54px;
+  min-height: 52px;
 }
 
 .target-item:hover {
@@ -170,15 +190,14 @@ body {
 
 .target-item.is-active::before {
   background: var(--ink-strong);
-  border-radius: 0 2px 2px 0;
-  top: 12px;
-  bottom: 12px;
+  border-radius: 0;
+  top: 10px;
+  bottom: 10px;
   width: 3px;
 }
 
 .target-glyph {
   border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font-size: 10px;
@@ -223,9 +242,8 @@ body {
   box-shadow: none;
 }
 
-/* Rail footer */
 .rail-footer {
-  padding: 14px 6px 4px;
+  padding: 12px 6px 2px;
   border-top: 1px solid var(--line);
   margin-top: auto;
 }
@@ -265,11 +283,6 @@ body {
   letter-spacing: -0.03em;
 }
 
-/* Worker chips */
-.worker-status {
-  border-radius: var(--radius-sm);
-}
-
 .worker-status.is-ok {
   border-color: var(--up-line);
   background: var(--up-bg);
@@ -284,12 +297,11 @@ body {
 
 /* ── Metric Strip ───────────────────────────────────────────────────────── */
 .metric-strip {
-  border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
 }
 
 .metric-item {
-  padding: 16px 20px;
+  padding: 14px 18px;
 }
 
 .metric-item > span {
@@ -316,14 +328,11 @@ body {
 .schedule-panel,
 .activity-filters,
 .activity-full-item {
-  border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
   border-color: var(--line);
 }
 
-.section-heading {
-  min-height: 52px;
-}
+.section-heading { min-height: 48px; }
 
 .section-heading h2 {
   font-size: 15px;
@@ -333,14 +342,64 @@ body {
 }
 
 .count-badge {
-  border-radius: var(--radius-sm);
   background: var(--accent-bg);
   color: var(--accent);
   border: 1px solid var(--line);
   font-weight: 780;
 }
 
-/* ── Activity Cards — Semantic Green/Red ────────────────────────────────── */
+/* ── Activity Signal Badge — COMPACT ────────────────────────────────────── */
+.activity-signal {
+  width: auto;
+  min-width: 28px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-subtle);
+  color: var(--ink-strong);
+  font-size: 11px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+/* Increase signal → green */
+.is-increase .activity-signal,
+.activity-summary-item.is-increase .activity-signal {
+  background: var(--up);
+  border-color: var(--up);
+  color: #fff;
+}
+
+/* Decrease signal → red */
+.is-decrease .activity-signal,
+.activity-summary-item.is-decrease .activity-signal {
+  background: var(--down);
+  border-color: var(--down);
+  color: #fff;
+}
+
+/* Notice signal (new, open, close, etc.) */
+.is-notice .activity-signal {
+  background: var(--surface-subtle);
+  border-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+
+/* ── Activity heading — tighter grid for smaller badge ─────────────────── */
+.activity-heading {
+  grid-template-columns: auto minmax(0, 1fr) minmax(100px, auto);
+  gap: 8px;
+}
+
+.activity-heading strong { font-weight: 700; }
+
+.activity-time .activity-age {
+  color: var(--muted-strong);
+  font-weight: 680;
+}
+
+/* ── Activity Summary Cards (overview page) ─────────────────────────────── */
 .activity-summary-item {
   border-left: none;
   background: var(--surface);
@@ -355,44 +414,23 @@ body {
   border-left: none;
 }
 
-/* Increase → Green */
 .activity-summary-item.is-increase {
   background: var(--up-bg);
 }
 
-.activity-summary-item.is-increase .activity-signal {
-  background: var(--up);
-  border-color: var(--up);
-  color: #fff;
-}
-
-/* Decrease → Red */
 .activity-summary-item.is-decrease {
   background: var(--down-bg);
 }
 
-.activity-summary-item.is-decrease .activity-signal {
-  background: var(--down);
-  border-color: var(--down);
-  color: #fff;
+.activity-summary-item.is-dead {
+  box-shadow: inset 3px 0 0 var(--down);
 }
 
-/* Default signal badge */
-.activity-signal {
-  border: 1px solid var(--line-strong);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-  color: var(--ink-strong);
-  font-weight: 800;
-  font-size: 12px;
+/* ── Activity Full-Page Items ───────────────────────────────────────────── */
+.activity-full-item {
+  overflow: hidden;
 }
 
-.is-decrease .activity-signal {
-  border-color: var(--down);
-  color: #fff;
-}
-
-/* Full-page activity items */
 .activity-full-item.is-increase {
   border-left: 3px solid var(--up);
 }
@@ -409,12 +447,12 @@ body {
   background: var(--down-bg);
 }
 
-.activity-full-item.is-dead {
-  border-color: var(--down-line);
+.activity-full-item.is-notice {
+  border-left: 3px solid var(--line-strong);
 }
 
-.activity-summary-item.is-dead {
-  box-shadow: inset 3px 0 0 var(--down);
+.activity-full-item.is-dead {
+  border-color: var(--down-line);
 }
 
 /* ── Booking Button ─────────────────────────────────────────────────────── */
@@ -430,25 +468,35 @@ body {
   color: #fff;
 }
 
-/* ── Activity timestamp / delta ─────────────────────────────────────────── */
-.activity-time .activity-age {
-  color: var(--muted-strong);
-  font-weight: 680;
+/* ── Operations Panel — Kill extra spacing ──────────────────────────────── */
+.hero-controls {
+  padding: 0 15px;
 }
 
-.activity-heading strong {
-  font-weight: 700;
+.operations-panel {
+  overflow: hidden;
 }
 
-/* ── Operations Panel ───────────────────────────────────────────────────── */
+/* Remove extra bottom margin/padding in operations area */
+.operations-panel .hero-controls > :last-child {
+  padding-bottom: 0;
+  margin-bottom: 0;
+}
 
-/* Pill-shaped toggle switch */
+.telegram-mini {
+  background: var(--surface-subtle);
+  border-top: 1px solid var(--line);
+  min-height: 48px;
+  padding: 8px 15px;
+}
+
+/* ── Toggle Switch — pill shape (exception to square rule) ──────────────── */
 .switch {
   position: relative;
-  width: 40px;
-  height: 22px;
+  width: 38px;
+  height: 20px;
   border: 1px solid var(--line-strong);
-  border-radius: 9999px;
+  border-radius: 9999px !important;
   background: var(--line);
   transition: background 200ms ease, border-color 200ms ease;
 }
@@ -457,11 +505,11 @@ body {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50% !important;
   background: #fff;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.12);
   content: "";
   transition: transform 200ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -477,7 +525,7 @@ body {
 
 .switch-row strong {
   font-weight: 650;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .switch-row small {
@@ -485,23 +533,13 @@ body {
   font-size: 10px;
 }
 
-/* Telegram mini */
-.telegram-mini {
-  background: var(--surface-subtle);
-  border-top: 1px solid var(--line);
-}
-
 /* ── Schedule ───────────────────────────────────────────────────────────── */
 .filter-group {
-  border-radius: var(--radius-sm);
   border: 1px solid var(--line);
   background: var(--surface-subtle);
 }
 
-.filter-button {
-  border-radius: var(--radius-sm);
-  font-weight: 650;
-}
+.filter-button { font-weight: 650; }
 
 .filter-button.is-active {
   background: var(--ink-strong);
@@ -509,16 +547,13 @@ body {
   box-shadow: none;
 }
 
-.date-heading {
-  background: var(--surface-subtle);
-}
+.date-heading { background: var(--surface-subtle); }
 
 .date-heading strong {
   font-weight: 720;
   font-size: 13px;
 }
 
-/* Screening rows */
 .screening-row {
   border-left: 3px solid transparent;
 }
@@ -527,51 +562,35 @@ body {
   border-left-color: var(--ink-strong);
 }
 
-.screening-row:hover {
-  background: #fafbf8;
-}
+.screening-row:hover { background: #fafbf8; }
 
-/* Seat colors: green for available, muted for sold out */
-.seat-block > strong.has-seats {
-  color: var(--up);
-}
+.seat-block > strong.has-seats { color: var(--up); }
+.seat-block > strong.is-sold { color: var(--muted); }
 
-.seat-block > strong.is-sold {
-  color: var(--muted);
-}
-
-/* Progress bar — green */
 .seat-block progress {
   height: 3px;
-  border-radius: 2px;
+  border-radius: 0 !important;
   background: #e6e8e2;
 }
 
 .seat-block progress::-webkit-progress-bar {
   background: #e6e8e2;
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .seat-block progress::-webkit-progress-value {
   background: var(--up);
-  border-radius: 2px;
+  border-radius: 0;
 }
 
 .seat-block progress::-moz-progress-bar {
   background: var(--up);
-  border-radius: 2px;
+  border-radius: 0;
 }
 
-/* Screening observation */
-.screening-observation.is-selected {
-  color: var(--up);
-}
+.screening-observation.is-selected { color: var(--up); }
 
-/* Watch button */
-.watch-button {
-  border-radius: var(--radius-sm);
-  font-weight: 650;
-}
+.watch-button { font-weight: 650; }
 
 .watch-button.is-on {
   border-color: var(--ink-strong);
@@ -579,14 +598,9 @@ body {
   color: var(--ink-strong);
 }
 
-/* Threshold editor */
-.threshold-editor {
-  border-radius: var(--radius-sm);
-}
-
 .threshold-editor:focus-within {
   border-color: var(--ink-strong);
-  box-shadow: 0 0 0 2px rgba(0,0,0,0.08);
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.06);
 }
 
 .threshold-editor button {
@@ -599,16 +613,10 @@ body {
   background: var(--accent-bg);
 }
 
-/* History deltas — semantic green/red */
-.history-delta.is-positive {
-  color: var(--up);
-}
+/* History deltas */
+.history-delta.is-positive { color: var(--up); }
+.history-delta.is-negative { color: var(--down); }
 
-.history-delta.is-negative {
-  color: var(--down);
-}
-
-/* Seat animation — green flash for increases */
 @keyframes seat-rise {
   0% {
     background: var(--up-bg);
@@ -625,10 +633,7 @@ body {
 }
 
 /* ── Buttons ────────────────────────────────────────────────────────────── */
-.button {
-  border-radius: var(--radius-sm);
-  font-weight: 650;
-}
+.button { font-weight: 650; }
 
 .button:hover:not(:disabled) {
   box-shadow: none;
@@ -646,35 +651,16 @@ body {
   border-color: #2a2c2a;
 }
 
-.icon-button {
-  border-radius: var(--radius-sm);
-}
-
-.target-toolbar .text-link {
-  border-radius: var(--radius-sm);
-}
-
 /* ── Inputs ─────────────────────────────────────────────────────────────── */
-.bulk-threshold-editor input,
-.bulk-threshold-editor .button,
-.poll-inputs input,
-.form-grid input,
-.form-grid select,
-.activity-filters input,
-.activity-filters select {
-  border-radius: var(--radius-sm);
-}
-
 input:focus,
 select:focus {
   border-color: var(--ink-strong);
-  box-shadow: 0 0 0 2px rgba(0,0,0,0.08);
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.06);
   outline: none;
 }
 
 /* ── Modal ──────────────────────────────────────────────────────────────── */
 .modal {
-  border-radius: var(--radius-lg);
   box-shadow: 0 16px 48px rgba(0,0,0,0.14);
 }
 
@@ -685,13 +671,8 @@ select:focus {
 }
 
 .setup-steps li > span {
-  border-radius: var(--radius-sm);
   background: var(--accent-bg);
   color: var(--accent);
-}
-
-.chat-option {
-  border-radius: var(--radius-sm);
 }
 
 .chat-option[aria-pressed="true"] {
@@ -701,14 +682,12 @@ select:focus {
 }
 
 code {
-  border-radius: var(--radius-sm);
   background: var(--surface-subtle);
   color: var(--ink);
 }
 
 /* ── Toast ──────────────────────────────────────────────────────────────── */
 .toast {
-  border-radius: var(--radius-sm);
   border: 1px solid var(--surface-strong);
   background: var(--surface-strong);
   box-shadow: var(--shadow-md);
@@ -722,7 +701,6 @@ code {
 
 /* ── Empty State ────────────────────────────────────────────────────────── */
 .empty-state {
-  border-radius: var(--radius-md);
   box-shadow: var(--shadow-sm);
 }
 
@@ -736,7 +714,47 @@ a:focus-visible {
   outline-offset: 2px;
 }
 
-/* ── Responsive tweaks ──────────────────────────────────────────────────── */
+/* ── Activity Full-Page View ────────────────────────────────────────────── */
+.activity-view {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.activity-page-heading h1 {
+  font-weight: 780;
+  letter-spacing: -0.03em;
+}
+
+.activity-full-list {
+  gap: 8px;
+}
+
+.activity-full-item > header {
+  padding: 12px 16px;
+  gap: 10px;
+}
+
+.activity-full-item .activity-heading {
+  grid-template-columns: auto minmax(0, 1fr) minmax(100px, auto);
+  gap: 8px;
+}
+
+.activity-full-item .activity-facts {
+  gap: 6px 12px;
+}
+
+.activity-details > summary {
+  min-height: 32px;
+  padding: 0 16px;
+  font-size: 10px;
+}
+
+.activity-detail-content {
+  padding: 12px 16px 14px;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────────── */
 @media (max-width: 1120px) {
   .target-rail {
     border-right: none;
@@ -747,6 +765,10 @@ a:focus-visible {
 @media (max-width: 560px) {
   .target-rail {
     border-radius: 0;
+  }
+
+  .activity-heading {
+    grid-template-columns: auto minmax(0, 1fr);
   }
 }
 
@@ -765,11 +787,4 @@ a:focus-visible {
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
   }
-}
-
-/* ── Activity Full View ─────────────────────────────────────────────────── */
-.activity-view {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 24px;
 }
