@@ -37,3 +37,16 @@ def test_rectilinear_controls_share_one_height_and_have_safe_breakpoints() -> No
     assert "@media (max-width: 900px)" in stylesheet
     assert "@media (max-width: 700px)" in stylesheet
     assert "border-radius: 2px" in stylesheet
+
+
+def test_dashboard_loads_spacious_refined_visual_layer() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
+
+    assert '/assets/refined.css?v=20260726-1' in page
+    assert 'class="product-brand"' in page
+    assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
+    assert "--surface-strong: #171a17" in stylesheet
+    assert ".activity-view" in stylesheet
+    assert "@media (max-width: 520px)" in stylesheet
+    assert "@media (prefers-reduced-motion: reduce)" in stylesheet
