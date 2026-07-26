@@ -4,9 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
-    <title>MovieMax 관리자 콘솔</title>
+    <meta name="theme-color" content="#f2f3ef">
+    <title>MovieMax — IMAX 감지 콘솔</title>
     <meta name="description" content="CGV IMAX 상영 회차와 잔여석을 추적하는 개인 관리 콘솔">
     <link rel="stylesheet" href="/assets/styles.css?v=20260726-7">
+    <link rel="stylesheet" href="/assets/refined.css?v=20260726-1">
     <script src="/assets/app.js?v=20260726-7" defer></script>
   </head>
   <body>
@@ -17,11 +19,22 @@
         <h1 class="visually-hidden" id="overviewTitle">IMAX 감지 현황</h1>
         <div class="workspace">
           <aside class="target-rail" aria-label="감시 대상">
+            <div class="product-brand" aria-label="MovieMax IMAX 감지 콘솔">
+              <span class="product-mark" aria-hidden="true">M</span>
+              <span class="product-brand-copy">
+                <strong>MovieMax</strong>
+                <small>IMAX watch console</small>
+              </span>
+            </div>
             <div class="section-heading target-heading">
               <h2>감시 대상</h2>
               <button class="icon-button" id="addTarget" type="button" aria-label="감시 대상 추가">+</button>
             </div>
             <div class="target-list" id="targetList"></div>
+            <div class="rail-footer" aria-hidden="true">
+              <span>Live monitoring</span>
+              <small>CGV schedule · Telegram alert</small>
+            </div>
           </aside>
 
           <section class="dashboard">
