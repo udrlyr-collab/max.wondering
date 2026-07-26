@@ -17,6 +17,10 @@ const state = {
   screeningThresholdDrafts: new Map(),
   screeningSeatSnapshot: new Map(),
   recentAlertsRenderSignature: "",
+  seenAlertIds: new Set(),
+  alertsInitialized: false,
+  alertMonitorRequestId: 0,
+  notificationPermissionRequested: false,
   dashboardRequests: { bootstrap: 0, screenings: 0, alerts: 0 },
   expandedScreenings: new Set(),
   expandedActivities: new Set(),
@@ -128,6 +132,95 @@ function showToast(message, error = false) {
   toast.classList.add("is-visible");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
+}
+
+function requestNotificationPermission() {
+  if (state.notificationPermissionRequested) return;
+  state.notificationPermissionRequested = true;
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+
+function showBrowserNotification(title, body, url) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  try {
+    const notification = new Notification(title, {
+      body,
+      requireInteraction: false,
+    });
+    notification.addEventListener("click", () => {
+      window.focus();
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+      notification.close();
+    });
+    setTimeout(() => notification.close(), 8000);
+  } catch (_error) { /* SW-only env */ }
+}
+
+function showInPageAlert(message, url) {
+  let banner = document.getElementById("liveAlertBanner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "liveAlertBanner";
+    banner.setAttribute("role", "alert");
+    banner.setAttribute("aria-live", "assertive");
+    document.body.appendChild(banner);
+  }
+  const copy = document.createElement("span");
+  copy.textContent = message;
+  banner.replaceChildren(copy);
+  if (url) {
+    const bookingLink = document.createElement("a");
+    bookingLink.href = url;
+    bookingLink.target = "_blank";
+    bookingLink.rel = "noopener noreferrer";
+    bookingLink.textContent = "예매하기";
+    banner.appendChild(bookingLink);
+  }
+  banner.classList.add("is-visible");
+  clearTimeout(banner._timer);
+  banner._timer = setTimeout(() => banner.classList.remove("is-visible"), 6000);
+}
+
+function notifyIncreaseAlert(alert) {
+  const entries = activityEntries(alert);
+  const entry = entries[0] || { screening: {}, previous: {}, changes: [] };
+  const screening = recordOrEmpty(entry.screening);
+  const seatChange = activitySeatChange(alert, entry);
+  const movieName = screening.movie_name || "IMAX";
+  const session = activitySessionText(screening);
+  const deltaText = seatChange ? `${seatChange.before} → ${seatChange.after}석` : "잔여석 변동";
+  const bookingUrl = activityBookingUrl(alert, screening);
+  showBrowserNotification(
+    `잔여석 증가 · ${movieName}`,
+    `${session}\n${deltaText}`,
+    bookingUrl,
+  );
+  showInPageAlert(`잔여석 증가 감지 · ${movieName} · ${session} · ${deltaText}`, bookingUrl);
+}
+
+async function monitorIncreaseAlerts() {
+  const requestId = state.alertMonitorRequestId + 1;
+  state.alertMonitorRequestId = requestId;
+  const params = new URLSearchParams({
+    limit: "50",
+    kind: "seat_increases",
+    notifications_only: "true",
+  });
+  const data = await api(`/api/v1/activity?${params.toString()}`);
+  if (requestId !== state.alertMonitorRequestId) return;
+  const alerts = Array.isArray(data.items)
+    ? data.items
+    : Array.isArray(data.activity) ? data.activity : [];
+  if (state.alertsInitialized) {
+    alerts
+      .filter((item) => item.kind === "seat_increases" && !state.seenAlertIds.has(String(item.id)))
+      .reverse()
+      .forEach(notifyIncreaseAlert);
+  }
+  alerts.forEach((item) => state.seenAlertIds.add(String(item.id)));
+  state.alertsInitialized = true;
 }
 
 function humanDateTime(value) {
@@ -1171,9 +1264,11 @@ async function loadRecentAlerts(targetId) {
     throw error;
   }
   if (requestId !== state.dashboardRequests.alerts || state.selectedTargetId !== targetId) return;
-  state.recentAlerts = Array.isArray(data.items)
+  const newAlerts = Array.isArray(data.items)
     ? data.items
     : Array.isArray(data.activity) ? data.activity : [];
+
+  state.recentAlerts = newAlerts;
   renderActivity();
 }
 
@@ -1639,6 +1734,8 @@ function reportError(error) {
   showToast(error.message || "처리 중 오류가 발생했습니다.", true);
 }
 
+document.addEventListener("click", () => requestNotificationPermission(), { once: true });
+
 document.addEventListener("click", (event) => {
   const targetButton = event.target.closest("[data-target-id]");
   if (targetButton) selectTarget(Number(targetButton.dataset.targetId)).catch(reportError);
@@ -1777,9 +1874,13 @@ byId("telegramEnabled").addEventListener("change", () => {
 initializePathView();
 updateLiveTimes();
 loadBootstrap({ preserveSelection: false })
-  .then(() => activityPath ? loadActivityPage(null, { page: 1, reset: true }) : null)
+  .then(async () => {
+    await monitorIncreaseAlerts();
+    if (activityPath) await loadActivityPage(null, { page: 1, reset: true });
+  })
   .catch(reportError);
 setInterval(updateLiveTimes, 1000);
 setInterval(() => {
   if (!document.hidden && !document.querySelector("dialog[open]")) loadBootstrap().catch(reportError);
+  monitorIncreaseAlerts().catch(reportError);
 }, 10000);

@@ -43,10 +43,30 @@ def test_dashboard_loads_spacious_refined_visual_layer() -> None:
     page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
     stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
 
-    assert "/assets/refined.css?v=20260726-1" in page
+    assert "/assets/refined.css?v=20260727-1" in page
+    assert "/assets/app.js?v=20260727-1" in page
     assert 'class="product-brand"' in page
     assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
     assert "--surface-strong: #171a17" in stylesheet
     assert ".activity-view" in stylesheet
     assert "@media (max-width: 520px)" in stylesheet
     assert "@media (prefers-reduced-motion: reduce)" in stylesheet
+
+
+def test_overview_cards_share_a_desktop_row_height() -> None:
+    stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
+
+    assert ".recent-panel,\n.operations-panel {\n  height: 100%;" in stylesheet
+    assert "@media (max-width: 1120px)" in stylesheet
+    assert ".recent-panel,\n  .operations-panel {\n    height: auto;" in stylesheet
+
+
+def test_open_dashboard_monitors_and_announces_new_seat_increases() -> None:
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "async function monitorIncreaseAlerts()" in script
+    assert 'kind: "seat_increases"' in script
+    assert "showBrowserNotification(" in script
+    assert "showInPageAlert(" in script
+    assert 'bookingLink.textContent = "예매하기"' in script
+    assert "monitorIncreaseAlerts().catch(reportError)" in script
