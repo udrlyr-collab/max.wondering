@@ -12,9 +12,11 @@ from moviemax.cgv import CgvClient
 from moviemax.config import Settings
 from moviemax.console_config import ConsoleSettings
 from moviemax.console_store import ConsoleStore, StaleVersionError
+from moviemax.locking import BlockingFileLock
 from moviemax.models import Screening
 from moviemax.polling import jittered_delay_seconds
 from moviemax.telegram import TelegramClient, TelegramError, render_event_messages
+from moviemax.web_push import WebPushClient, WebPushError, render_web_push_payload
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,11 @@ class ConsoleWorker:
         for index, screening_date in enumerate(dates):
             if index and self.base_settings.request_gap_seconds:
                 time.sleep(self.base_settings.request_gap_seconds)
+            latest = self.store.get_target(int(target["id"]))
+            if latest is None:
+                raise KeyError(f"target {target['id']} does not exist")
+            if int(latest["version"]) != int(target["version"]):
+                raise StaleVersionError("target version is stale")
             screenings.extend(client.get_screenings(movie_no, screening_date))
         return screenings
 
@@ -103,9 +110,11 @@ class ConsoleWorker:
                 summary["seat_decrease_count"],
             )
             return summary
-        except StaleVersionError:
+        except (StaleVersionError, KeyError):
             self.store.release_stale_target(target_id)
-            logger.info("Discarded stale poll result for target %d", target_id)
+            logger.info(
+                "Discarded stale or deleted poll result for target %d", target_id
+            )
             return None
         except Exception as exc:  # noqa: BLE001 - target failures are isolated
             safe_error = _safe_error(exc)
@@ -125,10 +134,11 @@ class ConsoleWorker:
                     _now() + timedelta(seconds=delay),
                     expected_version=version,
                 )
-            except StaleVersionError:
+            except (StaleVersionError, KeyError):
                 self.store.release_stale_target(target_id)
                 logger.info(
-                    "Target %d changed while its failed poll completed", target_id
+                    "Target %d changed or was deleted while its failed poll completed",
+                    target_id,
                 )
                 return None
             logger.error("Target %d poll failed: %s", target_id, safe_error)
@@ -156,6 +166,8 @@ class ConsoleWorker:
         dead = 0
 
         for event in self.store.pending_events():
+            if not self.store.is_outbox_event_pending(event.id):
+                continue
             latest = self._telegram_config()
             if latest is None:
                 break
@@ -172,7 +184,10 @@ class ConsoleWorker:
                 messages = render_event_messages(event)
             except Exception as exc:  # noqa: BLE001 - invalid persisted events are isolated
                 safe_error = _safe_error(exc)
-                self.store.mark_dead(event.id, safe_error)
+                try:
+                    self.store.mark_dead(event.id, safe_error)
+                except KeyError:
+                    continue
                 logger.error(
                     "Console event %s cannot be rendered: %s", event.id, safe_error
                 )
@@ -182,8 +197,16 @@ class ConsoleWorker:
 
             try:
                 for index in range(event.delivered_parts, len(messages)):
-                    client.send_message(messages[index])
-                    self.store.mark_part_delivered(event.id, index + 1)
+                    with BlockingFileLock(self.store.dispatch_lock_path):
+                        if not self.store.is_outbox_event_pending(event.id):
+                            break
+                        client.send_message(messages[index])
+                        try:
+                            self.store.mark_part_delivered(event.id, index + 1)
+                        except KeyError:
+                            break
+                if not self.store.is_outbox_event_pending(event.id):
+                    continue
             except TelegramError as exc:
                 failed += 1
                 safe_error = _safe_error(exc)
@@ -192,7 +215,10 @@ class ConsoleWorker:
                     not exc.retryable
                     or attempts >= self.base_settings.telegram_max_attempts
                 ):
-                    self.store.mark_dead(event.id, safe_error)
+                    try:
+                        self.store.mark_dead(event.id, safe_error)
+                    except KeyError:
+                        continue
                     dead += 1
                     logger.error(
                         "Console event %s was dead-lettered: %s", event.id, safe_error
@@ -202,7 +228,10 @@ class ConsoleWorker:
                     2 ** min(event.attempts, 6)
                 )
                 retry_after = max(exc.retry_after_seconds or 0, exponential)
-                self.store.mark_failed(event.id, safe_error, retry_after)
+                try:
+                    self.store.mark_failed(event.id, safe_error, retry_after)
+                except KeyError:
+                    continue
                 logger.error(
                     "Console event %s failed; retrying in %d seconds: %s",
                     event.id,
@@ -215,30 +244,136 @@ class ConsoleWorker:
                 safe_error = _safe_error(exc)
                 attempts = event.attempts + 1
                 if attempts >= self.base_settings.telegram_max_attempts:
-                    self.store.mark_dead(event.id, safe_error)
+                    try:
+                        self.store.mark_dead(event.id, safe_error)
+                    except KeyError:
+                        continue
                     dead += 1
                     continue
                 retry_after = self.base_settings.telegram_retry_base_seconds * (
                     2 ** min(event.attempts, 6)
                 )
-                self.store.mark_failed(event.id, safe_error, retry_after)
+                try:
+                    self.store.mark_failed(event.id, safe_error, retry_after)
+                except KeyError:
+                    continue
                 break
             else:
-                self.store.mark_sent(event.id)
-                sent += 1
+                try:
+                    self.store.mark_sent(event.id)
+                except KeyError:
+                    continue
+                else:
+                    sent += 1
 
+        return sent, failed, dead
+
+    def deliver_pending_web_push(self) -> tuple[int, int, int]:
+        # Keep notification transport failures from consuming the CGV polling
+        # loop. One dispatch performs at most one external Push request.
+        deliveries = self.store.pending_web_push_deliveries(limit=1)
+        if not deliveries:
+            return 0, 0, 0
+        vapid = self.store.get_web_push_vapid(include_private=True)
+        client = WebPushClient(
+            str(vapid["private_key"]),
+            self.console_settings.public_origin,
+            self.base_settings.request_timeout_seconds,
+        )
+        sent = 0
+        failed = 0
+        dead = 0
+        for delivery in deliveries:
+            if not self.store.is_web_push_delivery_pending(delivery.id):
+                continue
+            try:
+                payload = render_web_push_payload(
+                    delivery.event,
+                    fallback_url=self.console_settings.public_origin,
+                )
+            except Exception as exc:  # noqa: BLE001 - persisted payload is isolated
+                safe_error = _safe_error(exc)
+                if self.store.mark_web_push_dead(delivery.id, safe_error):
+                    failed += 1
+                    dead += 1
+                continue
+            with BlockingFileLock(self.store.dispatch_lock_path):
+                if not self.store.is_web_push_delivery_pending(delivery.id):
+                    continue
+                try:
+                    client.send(delivery.subscription_info, payload)
+                except WebPushError as exc:
+                    failed += 1
+                    safe_error = _safe_error(exc)
+                    if exc.expired:
+                        self.store.delete_web_push_subscription_by_id(
+                            delivery.subscription_id
+                        )
+                        logger.info(
+                            "Removed expired Web Push subscription %d",
+                            delivery.subscription_id,
+                        )
+                        continue
+                    attempts = delivery.attempts + 1
+                    if (
+                        not exc.retryable
+                        or attempts >= self.base_settings.telegram_max_attempts
+                    ):
+                        invalid_subscription = (
+                            not exc.retryable
+                            and exc.status_code in {None, 400, 401, 403}
+                        )
+                        if invalid_subscription:
+                            dead += self.store.disable_web_push_subscription_by_id(
+                                delivery.subscription_id,
+                                safe_error,
+                                failed_delivery_id=delivery.id,
+                            )
+                        elif self.store.mark_web_push_dead(delivery.id, safe_error):
+                            dead += 1
+                        logger.error(
+                            "Web Push delivery %d was permanently stopped: %s",
+                            delivery.id,
+                            safe_error,
+                        )
+                        continue
+                    exponential = self.base_settings.telegram_retry_base_seconds * (
+                        2 ** min(delivery.attempts, 6)
+                    )
+                    retry_after = max(exc.retry_after_seconds or 0, exponential)
+                    self.store.mark_web_push_failed(
+                        delivery.id,
+                        safe_error,
+                        retry_after,
+                    )
+                    logger.error(
+                        "Web Push delivery %d failed; retrying in %d seconds: %s",
+                        delivery.id,
+                        retry_after,
+                        safe_error,
+                    )
+                    break
+                else:
+                    if self.store.mark_web_push_sent(delivery.id):
+                        sent += 1
         return sent, failed, dead
 
     def heartbeat(self) -> dict[str, Any]:
         targets = self.store.list_targets()
         errors = sum(1 for target in targets if target["last_error"])
-        dead = len(self.store.list_outbox(status="dead", limit=1))
+        telegram_dead = len(self.store.list_outbox(status="dead", limit=1))
+        web_push_dead = len(self.store.list_web_push_deliveries(status="dead", limit=1))
+        # Browser Push is a best-effort, per-device channel. Permanent endpoint
+        # failures disable that subscription, so retained delivery rows are
+        # audit data and must not make the core CGV worker permanently unhealthy.
+        dead = telegram_dead
         payload = {
             "timestamp": _now().isoformat(),
             "status": "degraded" if errors or dead else "ok",
             "targets": len(targets),
             "target_errors": errors,
             "dead_letters": dead,
+            "web_push_dead_letters": web_push_dead,
         }
         self.store.set_metadata(
             "console_worker_heartbeat",
@@ -251,11 +386,13 @@ class ConsoleWorker:
         last_heartbeat = 0.0
         while not stop_event.is_set():
             self.deliver_pending()
+            self.deliver_pending_web_push()
             for target in self.store.due_targets(limit=10):
                 if stop_event.is_set():
                     break
                 self.process_target(target)
                 self.deliver_pending()
+                self.deliver_pending_web_push()
 
             if time.monotonic() - last_heartbeat >= 10:
                 self.heartbeat()

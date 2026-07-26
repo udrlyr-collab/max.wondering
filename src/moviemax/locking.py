@@ -11,8 +11,9 @@ class AlreadyRunningError(RuntimeError):
 
 
 class ProcessLock:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, *, blocking: bool = False) -> None:
         self.path = Path(path)
+        self.blocking = blocking
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> Self:
@@ -26,11 +27,15 @@ class ProcessLock:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                mode = msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK
+                msvcrt.locking(handle.fileno(), mode, 1)
             else:
                 import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                flags = fcntl.LOCK_EX
+                if not self.blocking:
+                    flags |= fcntl.LOCK_NB
+                fcntl.flock(handle.fileno(), flags)
         except OSError as exc:
             handle.close()
             raise AlreadyRunningError(
@@ -60,3 +65,10 @@ class ProcessLock:
         finally:
             self._handle.close()
             self._handle = None
+
+
+class BlockingFileLock(ProcessLock):
+    """Cross-process exclusive lock that waits for the current holder."""
+
+    def __init__(self, path: Path | str) -> None:
+        super().__init__(path, blocking=True)

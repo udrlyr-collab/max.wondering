@@ -22,7 +22,7 @@ class ConsoleSettings:
         "max.wondering.kr",
     )
     worker_tick_seconds: int = 2
-    seed_default_target: bool = True
+    seed_default_target: bool = False
 
     @classmethod
     def from_env(cls, *, require_encryption_key: bool = True) -> ConsoleSettings:
@@ -47,7 +47,7 @@ class ConsoleSettings:
             public_origin=public_origin,
             allowed_hosts=configured_hosts,
             worker_tick_seconds=_int("CONSOLE_WORKER_TICK_SECONDS", 2),
-            seed_default_target=_bool("SEED_DEFAULT_TARGET", True),
+            seed_default_target=_bool("SEED_DEFAULT_TARGET", False),
         )
         settings.validate(require_encryption_key=require_encryption_key)
         return settings

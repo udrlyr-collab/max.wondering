@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import ipaddress
 import json
 import mimetypes
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -24,6 +28,7 @@ from moviemax.console_store import (
 )
 from moviemax.polling import MAX_POLL_JITTER_SECONDS
 from moviemax.telegram import TelegramClient, TelegramError
+from moviemax.web_push import WebPushClient, WebPushError
 
 _ASSETS = Path(__file__).parent / "web_assets"
 mimetypes.add_type("font/ttf", ".ttf")
@@ -103,6 +108,10 @@ class TargetUpdate(StrictModel):
     )
 
 
+class TargetDelete(StrictModel):
+    version: int = Field(ge=1)
+
+
 class WatchUpdate(StrictModel):
     enabled: bool
     seat_change_threshold: int | None = Field(
@@ -135,6 +144,86 @@ class TelegramCandidateRequest(StrictModel):
     @classmethod
     def strip_token(cls, value: str | None) -> str | None:
         return value.strip() if value is not None else None
+
+
+def _web_push_endpoint(value: str) -> str:
+    normalized = value.strip()
+    if not normalized or len(normalized) > 2048:
+        raise ValueError("Web Push endpoint 형식이 올바르지 않습니다")
+    parsed = urlparse(normalized)
+    hostname = parsed.hostname or ""
+    if (
+        parsed.scheme != "https"
+        or not hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        raise ValueError("Web Push endpoint는 외부 HTTPS 주소여야 합니다")
+    lowered = hostname.rstrip(".").lower()
+    try:
+        address = ipaddress.ip_address(lowered)
+    except ValueError:
+        if (
+            "." not in lowered
+            or lowered == "localhost"
+            or lowered.endswith((".local", ".localhost", ".internal", ".lan"))
+        ):
+            raise ValueError("Web Push endpoint 호스트가 허용되지 않습니다")
+    else:
+        if not address.is_global:
+            raise ValueError("Web Push endpoint IP가 허용되지 않습니다")
+    return normalized
+
+
+def _web_push_key(value: str, *, expected_length: int, label: str) -> str:
+    normalized = value.strip()
+    try:
+        encoded = normalized.encode("ascii")
+        decoded = base64.urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
+    except (UnicodeEncodeError, ValueError, binascii.Error) as exc:
+        raise ValueError(f"{label} 형식이 올바르지 않습니다") from exc
+    if len(decoded) != expected_length:
+        raise ValueError(f"{label} 형식이 올바르지 않습니다")
+    if label == "p256dh" and decoded[0] != 4:
+        raise ValueError("p256dh 형식이 올바르지 않습니다")
+    return normalized
+
+
+class WebPushKeys(StrictModel):
+    p256dh: str = Field(min_length=1, max_length=256)
+    auth: str = Field(min_length=1, max_length=128)
+
+    @field_validator("p256dh")
+    @classmethod
+    def validate_p256dh(cls, value: str) -> str:
+        return _web_push_key(value, expected_length=65, label="p256dh")
+
+    @field_validator("auth")
+    @classmethod
+    def validate_auth(cls, value: str) -> str:
+        return _web_push_key(value, expected_length=16, label="auth")
+
+
+class WebPushSubscriptionUpdate(StrictModel):
+    endpoint: str
+    expiration_time: float | None = Field(default=None, ge=0, le=4.1e12)
+    keys: WebPushKeys
+    reactivate: bool = False
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        return _web_push_endpoint(value)
+
+
+class WebPushSubscriptionReference(StrictModel):
+    endpoint: str
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        return _web_push_endpoint(value)
 
 
 def _masked_chat_id(chat_id: str) -> str:
@@ -285,7 +374,8 @@ def create_app(
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
-            "base-uri 'none'; form-action 'self'"
+            "worker-src 'self'; manifest-src 'self'; base-uri 'none'; "
+            "form-action 'self'"
         )
         return response
 
@@ -312,6 +402,19 @@ def create_app(
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
 
+    @app.exception_handler(WebPushError)
+    async def web_push_error_handler(_request: Request, exc: WebPushError) -> Any:
+        response_status = (
+            status.HTTP_410_GONE if exc.expired else status.HTTP_502_BAD_GATEWAY
+        )
+        return JSONResponse(
+            {
+                "detail": f"브라우저 알림 전송 실패: {exc}",
+                "requires_resubscribe": exc.expired,
+            },
+            status_code=response_status,
+        )
+
     @app.get("/healthz")
     def health() -> dict[str, Any]:
         return {"status": "ok", "database": database.health_check()}
@@ -323,6 +426,7 @@ def create_app(
             "targets": database.list_targets(),
             "activity": database.list_activity_page(limit=50)["items"],
             "telegram": _telegram_public(database),
+            "web_push": database.web_push_status(),
             "status": _worker_status(database),
         }
 
@@ -438,6 +542,19 @@ def create_app(
             ) from exc
         return {"target": target}
 
+    @app.delete("/api/v1/targets/{target_id}")
+    def delete_target(target_id: int, payload: TargetDelete) -> dict[str, Any]:
+        try:
+            return database.delete_target(
+                target_id,
+                expected_version=payload.version,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "감시 대상을 찾을 수 없습니다",
+            ) from exc
+
     @app.post(
         "/api/v1/targets/{target_id}/refresh", status_code=status.HTTP_202_ACCEPTED
     )
@@ -496,6 +613,79 @@ def create_app(
                 "감시 대상을 찾을 수 없습니다",
             ) from exc
         return {"bulk_watch_update": result}
+
+    @app.put("/api/v1/web-push/subscription")
+    def save_web_push_subscription(
+        payload: WebPushSubscriptionUpdate,
+        request: Request,
+    ) -> dict[str, Any]:
+        subscription = database.save_web_push_subscription(
+            endpoint=payload.endpoint,
+            p256dh=payload.keys.p256dh,
+            auth=payload.keys.auth,
+            expiration_time_ms=payload.expiration_time,
+            user_agent=request.headers.get("user-agent", ""),
+            reactivate=payload.reactivate,
+        )
+        return {
+            "subscription": subscription,
+            "web_push": database.web_push_status(),
+        }
+
+    @app.delete("/api/v1/web-push/subscription")
+    def delete_web_push_subscription(
+        payload: WebPushSubscriptionReference,
+    ) -> dict[str, Any]:
+        removed = database.delete_web_push_subscription(payload.endpoint)
+        return {
+            "removed": removed,
+            "web_push": database.web_push_status(),
+        }
+
+    @app.post("/api/v1/web-push/test")
+    def test_web_push_subscription(
+        payload: WebPushSubscriptionReference,
+    ) -> dict[str, Any]:
+        subscription = database.get_web_push_subscription(payload.endpoint)
+        if subscription is None:
+            raise HTTPException(
+                status.HTTP_404_NOT_FOUND,
+                "이 기기의 브라우저 알림 구독을 찾을 수 없습니다",
+            )
+        vapid = database.get_web_push_vapid(include_private=True)
+        client = WebPushClient(
+            str(vapid["private_key"]),
+            configured.public_origin,
+            base_settings.request_timeout_seconds,
+        )
+        try:
+            client.send(
+                {
+                    "endpoint": subscription["endpoint"],
+                    "keys": subscription["keys"],
+                },
+                {
+                    "title": "MovieMax 브라우저 알림",
+                    "body": "이 기기로 잔여석 증가 알림을 받을 수 있습니다.",
+                    "tag": "moviemax-web-push-test",
+                    "url": configured.public_origin,
+                },
+            )
+        except WebPushError as exc:
+            if exc.expired:
+                database.delete_web_push_subscription_by_id(int(subscription["id"]))
+            elif not exc.retryable and exc.status_code in {None, 400, 401, 403}:
+                database.disable_web_push_subscription_by_id(
+                    int(subscription["id"]),
+                    f"{type(exc).__name__}: {exc}",
+                )
+                raise WebPushError(
+                    "브라우저 Push 구독이 영구적으로 거부되어 재구독이 필요합니다",
+                    expired=True,
+                    status_code=exc.status_code,
+                ) from exc
+            raise
+        return {"sent": True}
 
     @app.put("/api/v1/telegram")
     def save_telegram(payload: TelegramUpdate) -> dict[str, Any]:
@@ -560,6 +750,44 @@ def create_app(
         return FileResponse(
             _ASSETS / "index.html",
             headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/booking", include_in_schema=False)
+    def booking_redirect(
+        url: str = Query(min_length=1, max_length=2048),
+    ) -> RedirectResponse:
+        parsed = urlparse(url)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+        if (
+            parsed.scheme != "https"
+            or not hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or not (hostname == "cgv.co.kr" or hostname.endswith(".cgv.co.kr"))
+        ):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "허용되지 않은 예매 주소입니다",
+            )
+        return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
+
+    @app.get("/service-worker.js", include_in_schema=False)
+    def service_worker() -> FileResponse:
+        return FileResponse(
+            _ASSETS / "service-worker.js",
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "no-cache",
+                "Service-Worker-Allowed": "/",
+            },
+        )
+
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    def web_manifest() -> FileResponse:
+        return FileResponse(
+            _ASSETS / "manifest.webmanifest",
+            media_type="application/manifest+json",
+            headers={"Cache-Control": "public, max-age=3600"},
         )
 
     app.mount(

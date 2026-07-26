@@ -20,7 +20,7 @@ from moviemax.telegram import TelegramClient
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CGV screening Telegram monitor")
+    parser = argparse.ArgumentParser(description="CGV screening availability monitor")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="run the continuous monitor")
     subparsers.add_parser(

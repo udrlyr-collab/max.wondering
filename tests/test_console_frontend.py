@@ -44,9 +44,9 @@ def test_dashboard_loads_spacious_refined_visual_layer() -> None:
     page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
     stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
 
-    assert "/assets/refined.css?v=20260727-3" in page
-    assert "/assets/styles.css?v=20260727-3" in page
-    assert "/assets/app.js?v=20260727-3" in page
+    assert "/assets/refined.css?v=20260727-4" in page
+    assert "/assets/styles.css?v=20260727-4" in page
+    assert "/assets/app.js?v=20260727-4" in page
     assert 'class="product-brand"' in page
     assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
     assert "--surface-strong: #171a17" in stylesheet
@@ -68,10 +68,70 @@ def test_open_dashboard_monitors_and_announces_new_seat_increases() -> None:
 
     assert "async function monitorIncreaseAlerts()" in script
     assert 'kind: "seat_increases"' in script
-    assert "showBrowserNotification(" in script
     assert "showInPageAlert(" in script
+    assert "new Notification(" not in script
     assert 'bookingLink.textContent = "예매하기"' in script
     assert "monitorIncreaseAlerts().catch(reportBackgroundError)" in script
+
+
+def test_web_push_requires_explicit_opt_in_and_uses_a_service_worker() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+    worker = (ASSET_DIR / "service-worker.js").read_text(encoding="utf-8")
+    manifest = (ASSET_DIR / "manifest.webmanifest").read_text(encoding="utf-8")
+    stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
+
+    assert (
+        '<link rel="manifest" href="/manifest.webmanifest" '
+        'crossorigin="use-credentials">'
+    ) in page
+    assert 'class="notification-channel-list" role="group"' in page
+    assert 'id="webPushMiniAction"' in page
+    assert 'id="enableWebPush"' in page
+    assert 'id="testWebPush"' in page
+    assert 'id="disableWebPush"' in page
+    assert "Notification.requestPermission()" in script
+    assert (
+        'addEventListener("click", () => requestNotificationPermission()' not in script
+    )
+    assert 'navigator.serviceWorker.register("/service-worker.js"' in script
+    assert "registration.pushManager.subscribe" in script
+    assert 'method: "PUT"' in script
+    assert 'method: "DELETE"' in script
+    assert "serverSynced: false" in script
+    assert "serverInactive: false" in script
+    assert "syncSuppressed: false" in script
+    assert "webPushPendingEndpointStorageKey" in script
+    assert "Promise.allSettled" in script
+    assert "error.status = response.status" in script
+    assert "[404, 410].includes(Number(error?.status))" in script
+    assert "function applyWebPushSubscriptionResponse(result)" in script
+    assert "subscriptionStatus.active === true" in script
+    assert "subscriptionStatus.requires_resubscribe === true" in script
+    assert "async function replaceInactiveWebPushSubscription" in script
+    assert 'self.addEventListener("push"' in worker
+    assert 'self.addEventListener("notificationclick"' in worker
+    assert "self.registration.showNotification" in worker
+    assert '"display": "standalone"' in manifest
+    assert ".web-push-actions .button" in stylesheet
+    assert "height: var(--control-height)" in stylesheet
+    assert ".notification-channel-list > .telegram-mini" in stylesheet
+    assert "border-left: 0" in stylesheet
+
+
+def test_target_delete_ui_warns_that_all_related_history_is_removed() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="openDeleteTarget"' in page
+    assert 'id="deleteTargetDialog"' in page
+    assert "모든 상영 회차, 좌석 변동 이력, 알림 기록" in page
+    assert "async function deleteCurrentTarget(event)" in script
+    assert 'method: "DELETE"' in script
+    assert "seat_history" in script
+    assert "state.targets = state.targets.filter" in script
+    assert "삭제는 완료됐지만 최신 화면을 불러오지 못했습니다" in script
+    assert "reportBackgroundError(refreshError)" in script
 
 
 def test_target_dialog_requires_an_exact_movie_format_selection() -> None:

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping
@@ -9,8 +12,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from cryptography.fernet import Fernet, InvalidToken
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
-from moviemax.models import OutboxEvent, Screening
+from moviemax.locking import BlockingFileLock
+from moviemax.models import OutboxEvent, Screening, WebPushDelivery
 from moviemax.polling import jittered_delay_seconds, normalize_poll_jitter_seconds
 
 
@@ -42,6 +48,15 @@ def _timestamp(value: datetime | str | None = None) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _base64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def _base64url_decode(value: str) -> bytes:
+    encoded = value.encode("ascii")
+    return base64.urlsafe_b64decode(encoded + b"=" * (-len(encoded) % 4))
 
 
 class ConsoleStore:
@@ -226,6 +241,45 @@ class ConsoleStore:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS web_push_vapid (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    private_key_ciphertext BLOB NOT NULL,
+                    public_key TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    endpoint_hash TEXT NOT NULL UNIQUE,
+                    endpoint_ciphertext BLOB NOT NULL,
+                    p256dh_ciphertext BLOB NOT NULL,
+                    auth_ciphertext BLOB NOT NULL,
+                    expires_at TEXT,
+                    user_agent TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_success_at TEXT,
+                    last_failure_at TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    disabled_at TEXT,
+                    last_error TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS web_push_deliveries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id INTEGER NOT NULL REFERENCES console_outbox(id)
+                        ON DELETE CASCADE,
+                    subscription_id INTEGER NOT NULL
+                        REFERENCES web_push_subscriptions(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    sent_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    next_attempt_at TEXT,
+                    dead_lettered_at TEXT,
+                    last_error TEXT,
+                    UNIQUE(event_id, subscription_id)
+                );
+
                 CREATE TABLE IF NOT EXISTS console_metadata (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
@@ -239,6 +293,10 @@ class ConsoleStore:
                     ON seat_history(screening_id, revision);
                 CREATE INDEX IF NOT EXISTS idx_console_outbox_pending
                     ON console_outbox(
+                        sent_at, dead_lettered_at, next_attempt_at, id
+                    );
+                CREATE INDEX IF NOT EXISTS idx_web_push_deliveries_pending
+                    ON web_push_deliveries(
                         sent_at, dead_lettered_at, next_attempt_at, id
                     );
                 """
@@ -319,6 +377,44 @@ class ConsoleStore:
                   AND sent_at IS NULL
                 """
             )
+            self._ensure_web_push_vapid(connection)
+
+    def _ensure_web_push_vapid(
+        self,
+        connection: sqlite3.Connection,
+    ) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM web_push_vapid WHERE id = 1").fetchone()
+        if row is not None:
+            return row
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        private_raw = _base64url(
+            private_key.private_numbers().private_value.to_bytes(32, "big")
+        )
+        public_key = _base64url(
+            private_key.public_key().public_bytes(
+                serialization.Encoding.X962,
+                serialization.PublicFormat.UncompressedPoint,
+            )
+        )
+        now = _now()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO web_push_vapid(
+                id, private_key_ciphertext, public_key, created_at
+            ) VALUES (1, ?, ?, ?)
+            """,
+            (
+                self._fernet.encrypt(private_raw.encode("ascii")),
+                public_key,
+                now,
+            ),
+        )
+        stored = connection.execute(
+            "SELECT * FROM web_push_vapid WHERE id = 1"
+        ).fetchone()
+        if stored is None:  # pragma: no cover - guarded by the singleton insert
+            raise RuntimeError("Web Push VAPID key could not be created")
+        return stored
 
     @staticmethod
     def _target_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -519,6 +615,108 @@ class ConsoleStore:
                 (target_id,),
             ).fetchone()
         return self._target_from_row(row) if row is not None else None
+
+    @property
+    def dispatch_lock_path(self) -> Path:
+        return self.path.with_suffix(".dispatch.lock")
+
+    def delete_target(
+        self,
+        target_id: int,
+        *,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        with BlockingFileLock(self.dispatch_lock_path):
+            return self._delete_target_locked(
+                target_id,
+                expected_version=expected_version,
+            )
+
+    def _delete_target_locked(
+        self,
+        target_id: int,
+        *,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM watch_targets WHERE id = ?",
+                (target_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"target {target_id} does not exist")
+            current_version = int(row["version"])
+            if expected_version is not None and expected_version != current_version:
+                raise StaleVersionError("target version is stale")
+
+            screening_filter = "SELECT id FROM console_screenings WHERE target_id = ?"
+            counts = {
+                "screenings": int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM console_screenings WHERE target_id = ?",
+                        (target_id,),
+                    ).fetchone()[0]
+                ),
+                "watches": int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(*) FROM screening_watches
+                        WHERE screening_id IN ({screening_filter})
+                        """,
+                        (target_id,),
+                    ).fetchone()[0]
+                ),
+                "seat_history": int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(*) FROM seat_history
+                        WHERE screening_id IN ({screening_filter})
+                        """,
+                        (target_id,),
+                    ).fetchone()[0]
+                ),
+                "notifications": int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(*) FROM console_outbox
+                        WHERE target_id = ?
+                           OR screening_id IN ({screening_filter})
+                        """,
+                        (target_id, target_id),
+                    ).fetchone()[0]
+                ),
+                "web_push_deliveries": int(
+                    connection.execute(
+                        f"""
+                        SELECT COUNT(*)
+                        FROM web_push_deliveries AS delivery
+                        JOIN console_outbox AS event ON event.id = delivery.event_id
+                        WHERE event.target_id = ?
+                           OR event.screening_id IN ({screening_filter})
+                        """,
+                        (target_id, target_id),
+                    ).fetchone()[0]
+                ),
+            }
+            connection.execute(
+                f"""
+                DELETE FROM console_outbox
+                WHERE target_id = ?
+                   OR screening_id IN ({screening_filter})
+                """,
+                (target_id, target_id),
+            )
+            deleted = connection.execute(
+                "DELETE FROM watch_targets WHERE id = ? AND version = ?",
+                (target_id, current_version),
+            )
+            if deleted.rowcount != 1:
+                raise StaleVersionError("target version changed during delete")
+
+        return {
+            "target": self._target_from_row(row),
+            "deleted": {"targets": 1, **counts},
+        }
 
     def update_target(
         self,
@@ -931,7 +1129,21 @@ class ConsoleStore:
                 created_at,
             ),
         )
-        return cursor.rowcount == 1
+        inserted = cursor.rowcount == 1
+        if inserted and kind == "seat_increases":
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO web_push_deliveries(
+                    event_id, subscription_id, created_at
+                )
+                SELECT ?, id, ?
+                FROM web_push_subscriptions
+                WHERE disabled_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (int(cursor.lastrowid), created_at, created_at),
+            )
+        return inserted
 
     def apply_snapshot(
         self,
@@ -1805,6 +2017,452 @@ class ConsoleStore:
             result.append(item)
         return result
 
+    def get_web_push_vapid(
+        self,
+        *,
+        include_private: bool = False,
+    ) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = self._ensure_web_push_vapid(connection)
+        result: dict[str, Any] = {
+            "public_key": str(row["public_key"]),
+            "created_at": str(row["created_at"]),
+        }
+        if include_private:
+            try:
+                result["private_key"] = self._fernet.decrypt(
+                    bytes(row["private_key_ciphertext"])
+                ).decode("ascii")
+            except (InvalidToken, UnicodeDecodeError) as exc:
+                raise RuntimeError("Web Push VAPID key cannot be decrypted") from exc
+        return result
+
+    @staticmethod
+    def _web_push_endpoint_hash(endpoint: str) -> str:
+        return hashlib.sha256(endpoint.encode("utf-8")).hexdigest()
+
+    def web_push_status(self) -> dict[str, Any]:
+        now = _now()
+        with self._connection() as connection:
+            active_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM web_push_subscriptions
+                    WHERE disabled_at IS NULL
+                      AND (expires_at IS NULL OR expires_at > ?)
+                    """,
+                    (now,),
+                ).fetchone()[0]
+            )
+        return {
+            "configured": True,
+            "public_key": self.get_web_push_vapid()["public_key"],
+            "subscription_count": active_count,
+        }
+
+    def save_web_push_subscription(
+        self,
+        *,
+        endpoint: str,
+        p256dh: str,
+        auth: str,
+        expiration_time_ms: float | None = None,
+        user_agent: str = "",
+        reactivate: bool = False,
+    ) -> dict[str, Any]:
+        normalized_endpoint = endpoint.strip()
+        normalized_p256dh = p256dh.strip()
+        normalized_auth = auth.strip()
+        if not normalized_endpoint or not normalized_p256dh or not normalized_auth:
+            raise ValueError("Web Push endpoint and keys are required")
+        expires_at = None
+        if expiration_time_ms is not None:
+            expires_at = datetime.fromtimestamp(
+                expiration_time_ms / 1000,
+                tz=UTC,
+            ).isoformat()
+        endpoint_hash = self._web_push_endpoint_hash(normalized_endpoint)
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO web_push_subscriptions(
+                    endpoint_hash, endpoint_ciphertext, p256dh_ciphertext,
+                    auth_ciphertext, expires_at, user_agent, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(endpoint_hash) DO UPDATE SET
+                    endpoint_ciphertext = excluded.endpoint_ciphertext,
+                    p256dh_ciphertext = excluded.p256dh_ciphertext,
+                    auth_ciphertext = excluded.auth_ciphertext,
+                    expires_at = excluded.expires_at,
+                    user_agent = excluded.user_agent,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    endpoint_hash,
+                    self._fernet.encrypt(normalized_endpoint.encode("utf-8")),
+                    self._fernet.encrypt(normalized_p256dh.encode("ascii")),
+                    self._fernet.encrypt(normalized_auth.encode("ascii")),
+                    expires_at,
+                    user_agent.strip()[:300],
+                    now,
+                    now,
+                ),
+            )
+            if reactivate:
+                connection.execute(
+                    """
+                    UPDATE web_push_subscriptions
+                    SET disabled_at = NULL, last_error = NULL,
+                        consecutive_failures = 0, updated_at = ?
+                    WHERE endpoint_hash = ?
+                    """,
+                    (now, endpoint_hash),
+                )
+            row = connection.execute(
+                """
+                SELECT id, created_at, updated_at, disabled_at
+                FROM web_push_subscriptions
+                WHERE endpoint_hash = ?
+                """,
+                (endpoint_hash,),
+            ).fetchone()
+        if row is None:  # pragma: no cover - guarded by the upsert
+            raise RuntimeError("Web Push subscription could not be saved")
+        return {
+            "id": int(row["id"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "active": row["disabled_at"] is None,
+            "requires_resubscribe": row["disabled_at"] is not None,
+        }
+
+    def get_web_push_subscription(self, endpoint: str) -> dict[str, Any] | None:
+        endpoint_hash = self._web_push_endpoint_hash(endpoint.strip())
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM web_push_subscriptions
+                WHERE endpoint_hash = ? AND disabled_at IS NULL
+                  AND (expires_at IS NULL OR expires_at > ?)
+                """,
+                (endpoint_hash, _now()),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            stored_endpoint = self._fernet.decrypt(
+                bytes(row["endpoint_ciphertext"])
+            ).decode("utf-8")
+            p256dh = self._fernet.decrypt(bytes(row["p256dh_ciphertext"])).decode(
+                "ascii"
+            )
+            auth = self._fernet.decrypt(bytes(row["auth_ciphertext"])).decode("ascii")
+        except (InvalidToken, UnicodeDecodeError) as exc:
+            raise RuntimeError("Web Push subscription cannot be decrypted") from exc
+        if stored_endpoint != endpoint.strip():
+            return None
+        return {
+            "id": int(row["id"]),
+            "endpoint": stored_endpoint,
+            "keys": {"p256dh": p256dh, "auth": auth},
+        }
+
+    def delete_web_push_subscription(self, endpoint: str) -> bool:
+        endpoint_hash = self._web_push_endpoint_hash(endpoint.strip())
+        with (
+            BlockingFileLock(self.dispatch_lock_path),
+            self._connection(immediate=True) as connection,
+        ):
+            cursor = connection.execute(
+                "DELETE FROM web_push_subscriptions WHERE endpoint_hash = ?",
+                (endpoint_hash,),
+            )
+        return cursor.rowcount == 1
+
+    def delete_web_push_subscription_by_id(self, subscription_id: int) -> bool:
+        with self._connection(immediate=True) as connection:
+            cursor = connection.execute(
+                "DELETE FROM web_push_subscriptions WHERE id = ?",
+                (subscription_id,),
+            )
+        return cursor.rowcount == 1
+
+    def disable_web_push_subscription_by_id(
+        self,
+        subscription_id: int,
+        error: str,
+        *,
+        failed_delivery_id: int | None = None,
+    ) -> int:
+        """Disable a permanently rejected endpoint and close its pending work.
+
+        A disabled row is intentionally preserved so a page-load subscription
+        sync cannot silently reactivate the same broken browser endpoint. The
+        user can explicitly remove it and create a fresh browser subscription.
+        """
+        now = _now()
+        safe_error = error[:500]
+        with self._connection(immediate=True) as connection:
+            disabled = connection.execute(
+                """
+                UPDATE web_push_subscriptions
+                SET disabled_at = ?, last_failure_at = ?, last_error = ?,
+                    consecutive_failures = consecutive_failures + 1
+                WHERE id = ? AND disabled_at IS NULL
+                """,
+                (now, now, safe_error, subscription_id),
+            )
+            if disabled.rowcount != 1:
+                return 0
+            closed = connection.execute(
+                """
+                UPDATE web_push_deliveries
+                SET attempts = attempts + CASE WHEN id = ? THEN 1 ELSE 0 END,
+                    last_error = ?, dead_lettered_at = ?, next_attempt_at = NULL
+                WHERE subscription_id = ?
+                  AND sent_at IS NULL
+                  AND dead_lettered_at IS NULL
+                """,
+                (failed_delivery_id, safe_error, now, subscription_id),
+            )
+        return int(closed.rowcount)
+
+    def pending_web_push_deliveries(
+        self,
+        limit: int = 50,
+        *,
+        now: datetime | str | None = None,
+    ) -> list[WebPushDelivery]:
+        if limit < 1:
+            return []
+        at = _timestamp(now)
+        with self._connection(immediate=True) as connection:
+            connection.execute(
+                """
+                DELETE FROM web_push_subscriptions
+                WHERE expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (at,),
+            )
+            rows = connection.execute(
+                """
+                SELECT
+                    delivery.id AS delivery_id,
+                    delivery.subscription_id,
+                    delivery.attempts AS delivery_attempts,
+                    event.id AS event_id,
+                    event.event_key,
+                    event.kind,
+                    event.payload_json,
+                    event.attempts AS event_attempts,
+                    event.delivered_parts,
+                    subscription.endpoint_ciphertext,
+                    subscription.p256dh_ciphertext,
+                    subscription.auth_ciphertext
+                FROM web_push_deliveries AS delivery
+                JOIN console_outbox AS event ON event.id = delivery.event_id
+                JOIN web_push_subscriptions AS subscription
+                  ON subscription.id = delivery.subscription_id
+                WHERE delivery.sent_at IS NULL
+                  AND delivery.dead_lettered_at IS NULL
+                  AND event.kind = 'seat_increases'
+                  AND subscription.disabled_at IS NULL
+                  AND (delivery.next_attempt_at IS NULL
+                       OR delivery.next_attempt_at <= ?)
+                ORDER BY delivery.id
+                LIMIT ?
+                """,
+                (at, limit),
+            ).fetchall()
+        deliveries: list[WebPushDelivery] = []
+        for row in rows:
+            try:
+                endpoint = self._fernet.decrypt(
+                    bytes(row["endpoint_ciphertext"])
+                ).decode("utf-8")
+                p256dh = self._fernet.decrypt(bytes(row["p256dh_ciphertext"])).decode(
+                    "ascii"
+                )
+                auth = self._fernet.decrypt(bytes(row["auth_ciphertext"])).decode(
+                    "ascii"
+                )
+            except (InvalidToken, UnicodeDecodeError) as exc:
+                raise RuntimeError("Web Push subscription cannot be decrypted") from exc
+            event = OutboxEvent(
+                id=int(row["event_id"]),
+                event_key=str(row["event_key"]),
+                kind=str(row["kind"]),
+                payload=json.loads(str(row["payload_json"])),
+                attempts=int(row["event_attempts"]),
+                delivered_parts=int(row["delivered_parts"]),
+            )
+            deliveries.append(
+                WebPushDelivery(
+                    id=int(row["delivery_id"]),
+                    event=event,
+                    subscription_id=int(row["subscription_id"]),
+                    endpoint=endpoint,
+                    p256dh=p256dh,
+                    auth=auth,
+                    attempts=int(row["delivery_attempts"]),
+                )
+            )
+        return deliveries
+
+    def is_outbox_event_pending(self, event_id: int) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM console_outbox
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (event_id,),
+            ).fetchone()
+        return row is not None
+
+    def is_web_push_delivery_pending(self, delivery_id: int) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM web_push_deliveries
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (delivery_id,),
+            ).fetchone()
+        return row is not None
+
+    def mark_web_push_sent(self, delivery_id: int) -> bool:
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT subscription_id FROM web_push_deliveries
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            connection.execute(
+                """
+                UPDATE web_push_deliveries
+                SET sent_at = ?, last_error = NULL, next_attempt_at = NULL
+                WHERE id = ?
+                """,
+                (now, delivery_id),
+            )
+            connection.execute(
+                """
+                UPDATE web_push_subscriptions
+                SET last_success_at = ?, last_error = NULL,
+                    consecutive_failures = 0
+                WHERE id = ?
+                """,
+                (now, int(row["subscription_id"])),
+            )
+        return True
+
+    def mark_web_push_failed(
+        self,
+        delivery_id: int,
+        error: str,
+        retry_after_seconds: int,
+    ) -> bool:
+        if retry_after_seconds < 0:
+            raise ValueError("retry_after_seconds cannot be negative")
+        now = datetime.now(UTC)
+        next_attempt_at = (now + timedelta(seconds=retry_after_seconds)).isoformat()
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT subscription_id FROM web_push_deliveries
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            safe_error = error[:500]
+            connection.execute(
+                """
+                UPDATE web_push_deliveries
+                SET attempts = attempts + 1, last_error = ?, next_attempt_at = ?
+                WHERE id = ?
+                """,
+                (safe_error, next_attempt_at, delivery_id),
+            )
+            connection.execute(
+                """
+                UPDATE web_push_subscriptions
+                SET last_failure_at = ?, last_error = ?,
+                    consecutive_failures = consecutive_failures + 1
+                WHERE id = ?
+                """,
+                (now.isoformat(), safe_error, int(row["subscription_id"])),
+            )
+        return True
+
+    def mark_web_push_dead(self, delivery_id: int, error: str) -> bool:
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT subscription_id FROM web_push_deliveries
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (delivery_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            safe_error = error[:500]
+            connection.execute(
+                """
+                UPDATE web_push_deliveries
+                SET attempts = attempts + 1, last_error = ?,
+                    dead_lettered_at = ?, next_attempt_at = NULL
+                WHERE id = ?
+                """,
+                (safe_error, now, delivery_id),
+            )
+            connection.execute(
+                """
+                UPDATE web_push_subscriptions
+                SET last_failure_at = ?, last_error = ?,
+                    consecutive_failures = consecutive_failures + 1
+                WHERE id = ?
+                """,
+                (now, safe_error, int(row["subscription_id"])),
+            )
+        return True
+
+    def list_web_push_deliveries(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if status not in {None, "pending", "sent", "dead"}:
+            raise ValueError("status must be pending, sent, or dead")
+        where = ""
+        if status == "pending":
+            where = "WHERE sent_at IS NULL AND dead_lettered_at IS NULL"
+        elif status == "sent":
+            where = "WHERE sent_at IS NOT NULL"
+        elif status == "dead":
+            where = "WHERE dead_lettered_at IS NOT NULL"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM web_push_deliveries
+                {where}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(0, limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_telegram_config(
         self,
         *,
@@ -1940,6 +2598,58 @@ class ConsoleStore:
                     self._fernet.decrypt(bytes(token_row["bot_token_ciphertext"]))
                 except InvalidToken as exc:
                     raise RuntimeError("Telegram token cannot be decrypted") from exc
+            vapid_row = connection.execute(
+                """
+                SELECT private_key_ciphertext, public_key
+                FROM web_push_vapid WHERE id = 1
+                """
+            ).fetchone()
+            if vapid_row is None:
+                raise RuntimeError("Web Push VAPID key is missing")
+            try:
+                private_text = self._fernet.decrypt(
+                    bytes(vapid_row["private_key_ciphertext"])
+                ).decode("ascii")
+                private_raw = _base64url_decode(private_text)
+                if len(private_raw) != 32:
+                    raise ValueError("invalid private key length")
+                private_key = ec.derive_private_key(
+                    int.from_bytes(private_raw, "big"),
+                    ec.SECP256R1(),
+                )
+                public_key = _base64url(
+                    private_key.public_key().public_bytes(
+                        serialization.Encoding.X962,
+                        serialization.PublicFormat.UncompressedPoint,
+                    )
+                )
+            except (
+                InvalidToken,
+                UnicodeDecodeError,
+                UnicodeEncodeError,
+                ValueError,
+                binascii.Error,
+            ) as exc:
+                raise RuntimeError("Web Push VAPID key cannot be decrypted") from exc
+            if public_key != str(vapid_row["public_key"]):
+                raise RuntimeError("Web Push VAPID key pair does not match")
+            subscription_rows = connection.execute(
+                """
+                SELECT endpoint_ciphertext, p256dh_ciphertext, auth_ciphertext
+                FROM web_push_subscriptions
+                WHERE disabled_at IS NULL
+                """
+            ).fetchall()
+            try:
+                for subscription in subscription_rows:
+                    for column in (
+                        "endpoint_ciphertext",
+                        "p256dh_ciphertext",
+                        "auth_ciphertext",
+                    ):
+                        self._fernet.decrypt(bytes(subscription[column]))
+            except InvalidToken as exc:
+                raise RuntimeError("Web Push subscription cannot be decrypted") from exc
             connection.execute("SELECT 1")
         return {
             "quick_check": "ok",

@@ -1,0 +1,12 @@
+{
+  "id": "/",
+  "name": "max.wondering MovieMax",
+  "short_name": "MovieMax",
+  "description": "CGV 상영 회차와 잔여석 증가를 감지하는 개인 관리 콘솔",
+  "lang": "ko",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f2f3ef",
+  "theme_color": "#f2f3ef"
+}

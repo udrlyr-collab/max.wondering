@@ -1014,3 +1014,124 @@ a:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+/* ── Notification channels and destructive actions ───────────────────── */
+.operations-panel > .section-heading {
+  justify-content: space-between;
+}
+
+.notification-channel-list {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+}
+
+.notification-channel-list > .telegram-mini {
+  border-top: 0;
+  border-left: 0;
+}
+
+.notification-mini {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 56px;
+  padding: 8px 15px;
+  background: var(--surface-subtle);
+  gap: 10px;
+}
+
+.notification-mini + .notification-mini {
+  border-top: 1px solid var(--line);
+}
+
+.notification-mini > div {
+  min-width: 0;
+}
+
+.notification-mini strong,
+.notification-mini small {
+  display: block;
+}
+
+.notification-mini strong {
+  color: var(--ink-strong);
+  font-size: 11px;
+}
+
+.notification-mini small {
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-mini .text-button,
+.destructive-text {
+  flex: 0 0 auto;
+  height: var(--control-height);
+  min-height: var(--control-height);
+}
+
+.destructive-text,
+.destructive-text:hover {
+  color: #a14141;
+}
+
+.button-danger {
+  border-color: #c9a3a3;
+  background: #fffafa;
+  color: #8e3030;
+}
+
+.button-danger:hover:not(:disabled) {
+  border-color: #a14141;
+  background: #f8eded;
+  color: #782727;
+}
+
+.web-push-status-card,
+.delete-target-summary {
+  padding: 14px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+}
+
+.web-push-status-card strong,
+.delete-target-summary strong {
+  display: block;
+  color: var(--ink-strong);
+  font-size: 14px;
+}
+
+.web-push-status-card p,
+.delete-target-summary p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.web-push-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 18px;
+  gap: 7px;
+}
+
+.web-push-actions .button {
+  width: 100%;
+  height: var(--control-height);
+  min-height: var(--control-height);
+}
+
+@media (max-width: 560px) {
+  .notification-mini small {
+    white-space: normal;
+  }
+
+  .web-push-actions {
+    grid-template-columns: 1fr;
+  }
+}

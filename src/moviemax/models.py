@@ -71,6 +71,24 @@ class OutboxEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class WebPushDelivery:
+    id: int
+    event: OutboxEvent
+    subscription_id: int
+    endpoint: str
+    p256dh: str
+    auth: str
+    attempts: int
+
+    @property
+    def subscription_info(self) -> dict[str, Any]:
+        return {
+            "endpoint": self.endpoint,
+            "keys": {"p256dh": self.p256dh, "auth": self.auth},
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ChangeSummary:
     initialized_before_poll: bool
     screening_count: int

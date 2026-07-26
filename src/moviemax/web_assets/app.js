@@ -7,6 +7,20 @@ const state = {
   activity: [],
   recentAlerts: [],
   telegram: {},
+  webPush: {
+    configured: false,
+    public_key: "",
+    subscription_count: 0,
+    supported: null,
+    registration: null,
+    subscription: null,
+    serverSynced: false,
+    serverInactive: false,
+    syncSuppressed: false,
+    pendingEndpoint: "",
+    syncGeneration: 0,
+    loading: false,
+  },
   workerOk: null,
   catalog: null,
   catalogMovies: [],
@@ -23,7 +37,6 @@ const state = {
   alertsInitialized: false,
   alertMonitorRequestId: 0,
   alertMonitorInFlight: false,
-  notificationPermissionRequested: false,
   dashboardRequests: { bootstrap: 0, screenings: 0, alerts: 0 },
   expandedScreenings: new Set(),
   expandedActivities: new Set(),
@@ -132,7 +145,12 @@ async function api(path, options = {}) {
   }
   const response = await fetch(path, { ...options, headers, credentials: "same-origin" });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(apiErrorMessage(body, response.status));
+  if (!response.ok) {
+    const error = new Error(apiErrorMessage(body, response.status));
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
   return body;
 }
 
@@ -144,30 +162,6 @@ function showToast(message, error = false) {
   toast.classList.add("is-visible");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("is-visible"), 3200);
-}
-
-function requestNotificationPermission() {
-  if (state.notificationPermissionRequested) return;
-  state.notificationPermissionRequested = true;
-  if ("Notification" in window && Notification.permission === "default") {
-    Notification.requestPermission().catch(() => {});
-  }
-}
-
-function showBrowserNotification(title, body, url) {
-  if (!("Notification" in window) || Notification.permission !== "granted") return;
-  try {
-    const notification = new Notification(title, {
-      body,
-      requireInteraction: false,
-    });
-    notification.addEventListener("click", () => {
-      window.focus();
-      if (url) window.open(url, "_blank", "noopener,noreferrer");
-      notification.close();
-    });
-    setTimeout(() => notification.close(), 8000);
-  } catch (_error) { /* SW-only env */ }
 }
 
 function showInPageAlert(message, url) {
@@ -205,11 +199,6 @@ function notifyIncreaseAlert(alert) {
   const session = activitySessionText(screening);
   const deltaText = seatChange ? `${seatChange.before} → ${seatChange.after}석` : "잔여석 변동";
   const bookingUrl = activityBookingUrl(alert, screening);
-  showBrowserNotification(
-    `잔여석 증가 · ${movieName} · ${formatName}`,
-    `${session}\n${activityHallText(screening)} · ${deltaText}`,
-    bookingUrl,
-  );
   showInPageAlert(`잔여석 증가 감지 · ${movieName} · ${formatName} · ${session} · ${deltaText}`, bookingUrl);
 }
 
@@ -922,11 +911,11 @@ function deliveryStatus(item) {
   const sentAt = notification.sent_at || item.sent_at;
   const deadAt = notification.dead_lettered_at || item.dead_lettered_at;
   const status = notification.status || item.status;
-  if (sentAt) return "발송 완료";
-  if (deadAt) return "발송 실패";
+  if (sentAt) return "Telegram 발송 완료";
+  if (deadAt) return "Telegram 발송 실패";
   if (Object.prototype.hasOwnProperty.call(item, "notification") && item.notification === null) return "기록만 저장";
   if (!item.notification && !status) return "알림 정보 없음";
-  return status === "pending" ? "발송 대기" : status || "상태 미확인";
+  return status === "pending" ? "Telegram 발송 대기" : status || "상태 미확인";
 }
 
 function activityIsDead(item) {
@@ -1042,11 +1031,11 @@ function activityDetailsHtml(item) {
     ["감지 시각", humanDateTime(activityTimestamp(item))],
     ["상세 완전성", completeness],
     ["알림 상태", deliveryStatus(item)],
-    ["발송", (notification.sent_at || item.sent_at) ? humanDateTime(notification.sent_at || item.sent_at) : "아직 없음"],
+    ["Telegram 발송", (notification.sent_at || item.sent_at) ? humanDateTime(notification.sent_at || item.sent_at) : "아직 없음"],
     ["다음 시도", (notification.next_attempt_at || item.next_attempt_at) ? humanDateTime(notification.next_attempt_at || item.next_attempt_at) : "없음"],
     ["실패 확정", (notification.dead_lettered_at || item.dead_lettered_at) ? humanDateTime(notification.dead_lettered_at || item.dead_lettered_at) : "없음"],
     ["시도 횟수", notification.attempts ?? item.attempts ?? "—"],
-    ["분할 발송 수", notification.delivered_parts ?? item.delivered_parts ?? "—"],
+    ["Telegram 분할 발송 수", notification.delivered_parts ?? item.delivered_parts ?? "—"],
     ["마지막 오류", notification.last_error || item.last_error || "없음"],
   ], "detail-pairs activity-event-meta");
   return `
@@ -1495,6 +1484,454 @@ function renderTelegram() {
     : "Telegram 설정을 저장하고 활성화한 뒤 사용할 수 있습니다";
 }
 
+const webPushDisabledStorageKey = "moviemax.webPush.disabled";
+const webPushPendingEndpointStorageKey = "moviemax.webPush.pendingEndpoint";
+
+function readWebPushStorage(key) {
+  try {
+    return window.localStorage.getItem(key) || "";
+  } catch (_error) {
+    return "";
+  }
+}
+
+function writeWebPushStorage(key, value) {
+  try {
+    if (value) window.localStorage.setItem(key, value);
+    else window.localStorage.removeItem(key);
+  } catch (_error) { /* Storage can be unavailable in a private context. */ }
+}
+
+function setWebPushSyncSuppressed(suppressed) {
+  state.webPush.syncSuppressed = Boolean(suppressed);
+  writeWebPushStorage(webPushDisabledStorageKey, suppressed ? "1" : "");
+}
+
+function rememberWebPushPendingEndpoint(endpoint) {
+  state.webPush.pendingEndpoint = String(endpoint || "");
+  writeWebPushStorage(webPushPendingEndpointStorageKey, state.webPush.pendingEndpoint);
+}
+
+function webPushFeedback(message = "", kind = "info") {
+  const feedback = byId("webPushFeedback");
+  feedback.hidden = !message;
+  feedback.textContent = message;
+  feedback.className = `form-feedback is-${kind}`;
+  feedback.setAttribute("role", kind === "error" ? "alert" : "status");
+}
+
+function supportsWebPush() {
+  return window.isSecureContext
+    && "serviceWorker" in navigator
+    && "PushManager" in window
+    && "Notification" in window;
+}
+
+function urlBase64ToUint8Array(value) {
+  const padding = "=".repeat((4 - (value.length % 4)) % 4);
+  const raw = window.atob((value + padding).replaceAll("-", "+").replaceAll("_", "/"));
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+}
+
+function webPushSubscriptionBody(subscription) {
+  const value = subscription.toJSON();
+  if (!value.endpoint || !value.keys?.p256dh || !value.keys?.auth) {
+    throw new Error("브라우저가 유효한 Web Push 구독 정보를 제공하지 않았습니다.");
+  }
+  return {
+    endpoint: value.endpoint,
+    expiration_time: value.expirationTime ?? null,
+    keys: {
+      p256dh: value.keys.p256dh,
+      auth: value.keys.auth,
+    },
+  };
+}
+
+function applyWebPushSubscriptionResponse(result) {
+  Object.assign(state.webPush, recordOrEmpty(result?.web_push));
+  const subscriptionStatus = recordOrEmpty(result?.subscription);
+  const requiresResubscribe = subscriptionStatus.requires_resubscribe === true;
+  const active = subscriptionStatus.active === true && !requiresResubscribe;
+  state.webPush.serverSynced = active;
+  state.webPush.serverInactive = subscriptionStatus.active === false || requiresResubscribe;
+  return { active, requiresResubscribe };
+}
+
+async function webPushRegistration() {
+  if (!supportsWebPush()) return null;
+  if (state.webPush.registration) return state.webPush.registration;
+  const registration = await navigator.serviceWorker.register("/service-worker.js", {
+    scope: "/",
+    updateViaCache: "none",
+  });
+  state.webPush.registration = registration;
+  return registration;
+}
+
+async function createWebPushSubscription(registration) {
+  const publicKey = String(state.webPush.public_key || "");
+  if (!publicKey) throw new Error("서버의 Web Push 공개 키를 불러오지 못했습니다.");
+  return registration.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: urlBase64ToUint8Array(publicKey),
+  });
+}
+
+async function replaceInactiveWebPushSubscription(registration, subscription) {
+  const endpoint = String(subscription?.endpoint || "");
+  if (!endpoint) throw new Error("갱신할 브라우저 구독 주소를 찾지 못했습니다.");
+  rememberWebPushPendingEndpoint(endpoint);
+  const deleted = await api("/api/v1/web-push/subscription", {
+    method: "DELETE",
+    body: { endpoint },
+  });
+  Object.assign(state.webPush, recordOrEmpty(deleted.web_push));
+  state.webPush.serverSynced = false;
+  state.webPush.serverInactive = false;
+  rememberWebPushPendingEndpoint("");
+  let unsubscribed = false;
+  try {
+    unsubscribed = await subscription.unsubscribe();
+  } catch (error) {
+    setWebPushSyncSuppressed(true);
+    rememberWebPushPendingEndpoint(endpoint);
+    state.webPush.serverInactive = true;
+    throw error;
+  }
+  if (!unsubscribed) {
+    setWebPushSyncSuppressed(true);
+    rememberWebPushPendingEndpoint(endpoint);
+    state.webPush.serverInactive = true;
+    throw new Error("기존 브라우저 구독을 정리하지 못했습니다. 알림 끄기를 누른 뒤 다시 시도해 주세요.");
+  }
+  state.webPush.subscription = null;
+  const replacement = await createWebPushSubscription(registration);
+  state.webPush.subscription = replacement;
+  return replacement;
+}
+
+function renderWebPush() {
+  const supported = state.webPush.supported;
+  const localSubscribed = Boolean(state.webPush.subscription);
+  const active = localSubscribed
+    && state.webPush.serverSynced
+    && !state.webPush.syncSuppressed;
+  const cleanupPending = state.webPush.syncSuppressed
+    && (localSubscribed || Boolean(state.webPush.pendingEndpoint) || state.webPush.serverSynced);
+  const permission = "Notification" in window ? Notification.permission : "unsupported";
+  const serverCount = Number(state.webPush.subscription_count) || 0;
+  const miniTitle = byId("webPushMiniTitle");
+  const miniText = byId("webPushMiniText");
+  const statusText = byId("webPushDeviceStatus");
+  const helpText = byId("webPushDeviceHelp");
+
+  if (supported === null) {
+    miniTitle.textContent = "브라우저 알림 확인 중";
+    miniText.textContent = "이 기기의 지원 상태를 확인합니다.";
+    statusText.textContent = "지원 상태를 확인하는 중입니다.";
+    helpText.textContent = "알림 권한은 켜기 버튼을 누를 때만 요청합니다.";
+  } else if (!supported) {
+    miniTitle.textContent = "브라우저 알림 사용 불가";
+    miniText.textContent = "지원되는 HTTPS 웹 앱에서 설정하세요.";
+    statusText.textContent = "현재 실행 환경에서는 Web Push를 사용할 수 없습니다.";
+    helpText.textContent = "iPhone·iPad에서는 홈 화면에 추가한 웹 앱으로 다시 열어 설정하세요.";
+  } else if (cleanupPending) {
+    miniTitle.textContent = "브라우저 알림 해제 필요";
+    miniText.textContent = "서버 또는 이 기기의 구독 정리를 다시 시도하세요.";
+    statusText.textContent = "브라우저 알림 해제가 아직 완전히 끝나지 않았습니다.";
+    helpText.textContent = "알림 끄기를 다시 누르면 남은 서버·브라우저 구독만 정리합니다.";
+  } else if (permission === "denied") {
+    miniTitle.textContent = "브라우저 알림 차단됨";
+    miniText.textContent = "브라우저 또는 기기 설정에서 권한을 허용하세요.";
+    statusText.textContent = "알림 권한이 차단되어 있습니다.";
+    helpText.textContent = "브라우저의 사이트 설정에서 알림 권한을 허용한 뒤 다시 시도하세요.";
+  } else if (active) {
+    miniTitle.textContent = "브라우저 알림 켜짐";
+    miniText.textContent = `이 기기 연결됨 · 서버 구독 ${serverCount}개`;
+    statusText.textContent = "이 기기의 브라우저 알림이 켜져 있습니다.";
+    helpText.textContent = "기준을 충족한 잔여석 증가를 사이트가 닫혀 있어도 알립니다.";
+  } else if (localSubscribed && state.webPush.serverInactive) {
+    miniTitle.textContent = "브라우저 구독 갱신 필요";
+    miniText.textContent = "만료되거나 중지된 구독을 새로 연결하세요.";
+    statusText.textContent = "서버가 이 브라우저 구독을 비활성 상태로 확인했습니다.";
+    helpText.textContent = "알림 켜기를 누르면 기존 구독을 정리하고 새 구독을 만듭니다.";
+  } else if (localSubscribed) {
+    miniTitle.textContent = "브라우저 알림 서버 연결 필요";
+    miniText.textContent = "이 기기의 구독을 서버에 다시 저장하세요.";
+    statusText.textContent = "브라우저 구독은 있지만 서버 연결이 완료되지 않았습니다.";
+    helpText.textContent = "알림 켜기를 누르면 기존 구독을 서버에 다시 저장합니다.";
+  } else {
+    miniTitle.textContent = "브라우저 알림 꺼짐";
+    miniText.textContent = serverCount ? `다른 기기 구독 ${serverCount}개` : "이 기기에 알림을 연결할 수 있습니다.";
+    statusText.textContent = "이 기기는 아직 브라우저 알림에 연결되지 않았습니다.";
+    helpText.textContent = "켜기 버튼을 누르면 브라우저가 알림 권한을 요청합니다.";
+  }
+
+  const busy = Boolean(state.webPush.loading);
+  const missingConfiguration = !state.webPush.configured
+    || (!localSubscribed && !state.webPush.public_key);
+  byId("enableWebPush").disabled = busy
+    || !supported
+    || active
+    || cleanupPending
+    || missingConfiguration
+    || permission === "denied";
+  byId("disableWebPush").disabled = busy
+    || (!localSubscribed && !state.webPush.pendingEndpoint && !state.webPush.serverSynced);
+  byId("testWebPush").disabled = busy || !active;
+  byId("webPushMiniAction").disabled = busy;
+}
+
+async function removeWebPushSubscription(subscription, endpointValue = "") {
+  const endpoint = String(endpointValue || subscription?.endpoint || state.webPush.pendingEndpoint || "");
+  if (endpoint) rememberWebPushPendingEndpoint(endpoint);
+  const serverAttempt = endpoint
+    ? Promise.resolve().then(() => api("/api/v1/web-push/subscription", {
+      method: "DELETE",
+      body: { endpoint },
+    }))
+    : Promise.resolve(null);
+  const browserAttempt = subscription
+    ? Promise.resolve().then(() => subscription.unsubscribe())
+    : Promise.resolve(true);
+  const [serverResult, browserResult] = await Promise.allSettled([
+    serverAttempt,
+    browserAttempt,
+  ]);
+
+  let serverRemoved = !endpoint;
+  let browserRemoved = !subscription;
+  const errors = [];
+  if (serverResult.status === "fulfilled") {
+    serverRemoved = true;
+    state.webPush.serverSynced = false;
+    state.webPush.serverInactive = false;
+    Object.assign(state.webPush, recordOrEmpty(serverResult.value?.web_push));
+    if (state.webPush.pendingEndpoint === endpoint) rememberWebPushPendingEndpoint("");
+  } else {
+    errors.push(serverResult.reason);
+  }
+  if (browserResult.status === "fulfilled" && browserResult.value === true) {
+    browserRemoved = true;
+    if (!subscription
+        || state.webPush.subscription === subscription
+        || state.webPush.subscription?.endpoint === endpoint) {
+      state.webPush.subscription = null;
+    }
+  } else if (browserResult.status === "rejected") {
+    errors.push(browserResult.reason);
+  } else {
+    errors.push(new Error("브라우저가 이 기기의 알림 구독 해제를 완료하지 못했습니다."));
+  }
+  return { serverRemoved, browserRemoved, errors };
+}
+
+async function initializeWebPush({ syncServer = true } = {}) {
+  state.webPush.supported = supportsWebPush();
+  state.webPush.syncSuppressed = state.webPush.syncSuppressed
+    || readWebPushStorage(webPushDisabledStorageKey) === "1";
+  state.webPush.pendingEndpoint = state.webPush.pendingEndpoint
+    || readWebPushStorage(webPushPendingEndpointStorageKey);
+  renderWebPush();
+  if (!state.webPush.supported) return;
+  let subscription = null;
+  let attemptedGeneration = null;
+  try {
+    const registration = await webPushRegistration();
+    subscription = await registration.pushManager.getSubscription();
+    state.webPush.subscription = subscription;
+    if (state.webPush.syncSuppressed) {
+      state.webPush.serverSynced = false;
+      if (subscription || state.webPush.pendingEndpoint) {
+        const cleanup = await removeWebPushSubscription(subscription);
+        cleanup.errors.forEach(reportBackgroundError);
+        if (cleanup.errors.length && byId("webPushDialog").open) {
+          webPushFeedback("이 기기의 알림 해제를 완전히 마치지 못했습니다. 알림 끄기를 다시 눌러 주세요.", "error");
+        }
+      }
+      return;
+    }
+    if (!subscription) {
+      state.webPush.serverSynced = false;
+      state.webPush.serverInactive = false;
+      return;
+    }
+    if (!syncServer || Notification.permission !== "granted") {
+      state.webPush.serverSynced = false;
+      return;
+    }
+    if (state.webPush.loading) return;
+    const generation = state.webPush.syncGeneration;
+    attemptedGeneration = generation;
+    const result = await api("/api/v1/web-push/subscription", {
+      method: "PUT",
+      body: webPushSubscriptionBody(subscription),
+    });
+    if (state.webPush.syncSuppressed) {
+      rememberWebPushPendingEndpoint(subscription.endpoint);
+      const cleanup = await removeWebPushSubscription(subscription);
+      cleanup.errors.forEach(reportBackgroundError);
+      return;
+    }
+    if (generation !== state.webPush.syncGeneration) return;
+    const serverState = applyWebPushSubscriptionResponse(result);
+    if (!serverState.active && byId("webPushDialog").open) {
+      webPushFeedback("서버가 이 구독을 비활성 상태로 확인했습니다. 알림 켜기를 눌러 새 구독으로 갱신하세요.", "error");
+    }
+  } catch (error) {
+    const superseded = attemptedGeneration !== null
+      && attemptedGeneration !== state.webPush.syncGeneration
+      && !state.webPush.syncSuppressed;
+    if (!superseded) state.webPush.serverSynced = false;
+    if (!superseded && !state.webPush.syncSuppressed && byId("webPushDialog").open) {
+      webPushFeedback(`서버에 브라우저 구독을 저장하지 못했습니다. ${errorMessage(error)}`, "error");
+    }
+    reportBackgroundError(error);
+  } finally {
+    renderWebPush();
+  }
+}
+
+function openWebPushDialog() {
+  webPushFeedback();
+  renderWebPush();
+  const dialog = byId("webPushDialog");
+  const initialFocus = [byId("enableWebPush"), byId("testWebPush"), byId("disableWebPush")]
+    .find((button) => !button.disabled) || dialog.querySelector(".dialog-close");
+  showDialog(dialog, initialFocus);
+  initializeWebPush().catch(reportBackgroundError);
+}
+
+async function enableWebPush() {
+  if (!supportsWebPush()) return;
+  const button = byId("enableWebPush");
+  const generation = state.webPush.syncGeneration + 1;
+  state.webPush.syncGeneration = generation;
+  setWebPushSyncSuppressed(false);
+  state.webPush.loading = true;
+  setButtonBusy(button, true);
+  webPushFeedback("이 기기의 알림 권한과 구독을 설정하고 있습니다.", "pending");
+  renderWebPush();
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      throw new Error(permission === "denied"
+        ? "알림 권한이 차단되었습니다. 브라우저 사이트 설정에서 허용하세요."
+        : "알림 권한이 허용되지 않았습니다.");
+    }
+    const registration = await webPushRegistration();
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await createWebPushSubscription(registration);
+    } else if (state.webPush.serverInactive) {
+      subscription = await replaceInactiveWebPushSubscription(registration, subscription);
+    }
+    state.webPush.subscription = subscription;
+    state.webPush.serverSynced = false;
+    let result = await api("/api/v1/web-push/subscription", {
+      method: "PUT",
+      body: webPushSubscriptionBody(subscription),
+    });
+    if (state.webPush.syncSuppressed) {
+      rememberWebPushPendingEndpoint(subscription.endpoint);
+      const cleanup = await removeWebPushSubscription(subscription);
+      cleanup.errors.forEach(reportBackgroundError);
+      return;
+    }
+    if (generation !== state.webPush.syncGeneration) return;
+    let serverState = applyWebPushSubscriptionResponse(result);
+    if (!serverState.active && (state.webPush.serverInactive || serverState.requiresResubscribe)) {
+      subscription = await replaceInactiveWebPushSubscription(registration, subscription);
+      state.webPush.subscription = subscription;
+      result = await api("/api/v1/web-push/subscription", {
+        method: "PUT",
+        body: webPushSubscriptionBody(subscription),
+      });
+      serverState = applyWebPushSubscriptionResponse(result);
+    }
+    if (!serverState.active) {
+      throw new Error("서버가 브라우저 구독을 활성 상태로 저장하지 못했습니다. 다시 시도해 주세요.");
+    }
+    rememberWebPushPendingEndpoint("");
+    webPushFeedback("이 기기의 브라우저 알림을 켰습니다. 시험 알림으로 수신을 확인할 수 있습니다.", "success");
+    showToast("이 기기의 브라우저 알림을 켰습니다.");
+  } catch (error) {
+    state.webPush.serverSynced = false;
+    webPushFeedback(errorMessage(error), "error");
+  } finally {
+    state.webPush.loading = false;
+    setButtonBusy(button, false);
+    renderWebPush();
+  }
+}
+
+async function disableWebPush() {
+  const subscription = state.webPush.subscription;
+  const endpoint = String(subscription?.endpoint || state.webPush.pendingEndpoint || "");
+  if (!subscription && !endpoint) return;
+  const button = byId("disableWebPush");
+  state.webPush.syncGeneration += 1;
+  setWebPushSyncSuppressed(true);
+  if (endpoint) rememberWebPushPendingEndpoint(endpoint);
+  state.webPush.loading = true;
+  setButtonBusy(button, true);
+  webPushFeedback("서버 구독과 이 기기의 알림을 해제하고 있습니다.", "pending");
+  renderWebPush();
+  try {
+    const cleanup = await removeWebPushSubscription(subscription, endpoint);
+    if (cleanup.serverRemoved && cleanup.browserRemoved) {
+      webPushFeedback("이 기기의 브라우저 알림을 껐습니다.", "success");
+      showToast("이 기기의 브라우저 알림을 껐습니다.");
+    } else {
+      const details = cleanup.errors.map(errorMessage).join(" · ");
+      webPushFeedback(`알림 해제를 완전히 마치지 못했습니다.${details ? ` ${details}` : ""} 다시 시도해 주세요.`, "error");
+    }
+  } finally {
+    state.webPush.loading = false;
+    setButtonBusy(button, false);
+    renderWebPush();
+  }
+}
+
+async function testWebPush() {
+  const subscription = state.webPush.subscription;
+  if (!subscription || !state.webPush.serverSynced) return;
+  const button = byId("testWebPush");
+  state.webPush.loading = true;
+  setButtonBusy(button, true);
+  webPushFeedback("서버에서 이 기기로 시험 알림을 보내고 있습니다.", "pending");
+  renderWebPush();
+  try {
+    await api("/api/v1/web-push/test", {
+      method: "POST",
+      body: { endpoint: subscription.endpoint },
+    });
+    webPushFeedback("시험 알림을 발송했습니다. 운영체제 알림 영역에서 확인하세요.", "success");
+  } catch (error) {
+    if ([404, 410].includes(Number(error?.status))) {
+      state.webPush.syncGeneration += 1;
+      state.webPush.serverSynced = false;
+      setWebPushSyncSuppressed(true);
+      rememberWebPushPendingEndpoint(subscription.endpoint);
+      const cleanup = await removeWebPushSubscription(subscription);
+      cleanup.errors.forEach(reportBackgroundError);
+      webPushFeedback(
+        cleanup.errors.length
+          ? "만료된 구독을 완전히 정리하지 못했습니다. 알림 끄기를 다시 눌러 주세요."
+          : "브라우저 구독이 만료되어 정리했습니다. 이 기기 알림을 다시 켜 주세요.",
+        "error",
+      );
+    } else {
+      webPushFeedback(errorMessage(error), "error");
+    }
+  } finally {
+    state.webPush.loading = false;
+    setButtonBusy(button, false);
+    renderWebPush();
+  }
+}
+
 async function loadBootstrap({ preserveSelection = true } = {}) {
   const requestId = state.dashboardRequests.bootstrap + 1;
   state.dashboardRequests.bootstrap = requestId;
@@ -1519,6 +1956,7 @@ async function loadBootstrap({ preserveSelection = true } = {}) {
       ? data.activity
       : Array.isArray(data.activity?.items) ? data.activity.items : [];
     state.telegram = recordOrEmpty(data.telegram);
+    Object.assign(state.webPush, recordOrEmpty(data.web_push));
     reconcileRefreshRequest();
     if (!preserveSelection || !state.targets.some((item) => item.id === state.selectedTargetId)) {
       state.selectedTargetId = state.targets[0]?.id || null;
@@ -1529,6 +1967,7 @@ async function loadBootstrap({ preserveSelection = true } = {}) {
     renderActivityTargetFilter();
     restoreFocusIfLost(marker);
     renderTelegram();
+    renderWebPush();
     if (state.selectedTargetId && !activityPath) {
       await Promise.all([
         loadScreenings(state.selectedTargetId),
@@ -1606,6 +2045,67 @@ async function selectTarget(id) {
   renderDashboard();
   renderActivity();
   await Promise.all([loadScreenings(id), loadRecentAlerts(id)]);
+}
+
+function deleteTargetFeedback(message = "") {
+  const feedback = byId("deleteTargetFeedback");
+  feedback.hidden = !message;
+  feedback.textContent = message;
+  feedback.className = "form-feedback is-error";
+}
+
+function openDeleteTargetDialog() {
+  const target = selectedTarget();
+  if (!target) return;
+  deleteTargetFeedback();
+  byId("deleteTargetName").textContent = `${target.site_name} · ${target.movie_name} · ${targetFormatLabel(target)}`;
+  showDialog(byId("deleteTargetDialog"), byId("confirmDeleteTarget"));
+}
+
+async function deleteCurrentTarget(event) {
+  event.preventDefault();
+  const target = selectedTarget();
+  if (!target) return;
+  const button = byId("confirmDeleteTarget");
+  const originalLabel = button.textContent;
+  setButtonBusy(button, true);
+  button.textContent = "삭제 중…";
+  deleteTargetFeedback();
+  try {
+    let result;
+    try {
+      result = await api(`/api/v1/targets/${target.id}`, {
+        method: "DELETE",
+        body: { version: target.version },
+      });
+    } catch (error) {
+      deleteTargetFeedback(errorMessage(error));
+      return;
+    }
+    const deleted = recordOrEmpty(result.deleted);
+    const successMessage = `감시 대상과 기록을 삭제했습니다 · 회차 ${Number(deleted.screenings) || 0}개 · 좌석 이력 ${Number(deleted.seat_history) || 0}건 · 알림 ${Number(deleted.notifications) || 0}건`;
+    byId("deleteTargetDialog").close();
+    state.targets = state.targets.filter((item) => item.id !== target.id);
+    state.selectedTargetId = state.targets[0]?.id || null;
+    state.screenings = [];
+    state.recentAlerts = [];
+    state.pollSettingsDirtyTargetId = null;
+    state.bulkThresholdDirtyTargetId = null;
+    renderTargets();
+    renderActivityTargetFilter();
+    renderDashboard();
+    renderActivity();
+    showToast(successMessage);
+    try {
+      await loadBootstrap({ preserveSelection: false });
+    } catch (refreshError) {
+      reportBackgroundError(refreshError);
+      showToast(`삭제는 완료됐지만 최신 화면을 불러오지 못했습니다. 새로고침해 주세요. · ${errorMessage(refreshError)}`, true);
+    }
+  } finally {
+    setButtonBusy(button, false);
+    button.textContent = originalLabel;
+  }
 }
 
 async function patchTarget(values) {
@@ -2111,8 +2611,6 @@ function reportError(error) {
   showToast(error.message || "처리 중 오류가 발생했습니다.", true);
 }
 
-document.addEventListener("click", () => requestNotificationPermission(), { once: true });
-
 document.addEventListener("click", (event) => {
   const targetButton = event.target.closest("[data-target-id]");
   if (targetButton) selectTarget(Number(targetButton.dataset.targetId)).catch(reportError);
@@ -2212,6 +2710,8 @@ byId("addTarget").addEventListener("click", () => openTargetDialog().catch(repor
 byId("emptyAddTarget").addEventListener("click", () => openTargetDialog().catch(reportError));
 byId("openTelegram").addEventListener("click", openTelegramDialog);
 byId("telegramMiniAction").addEventListener("click", openTelegramDialog);
+byId("webPushMiniAction").addEventListener("click", openWebPushDialog);
+byId("openDeleteTarget").addEventListener("click", openDeleteTargetDialog);
 byId("refreshNow").addEventListener("click", () => refreshCurrent().catch(reportError));
 byId("targetEnabled").addEventListener("change", (event) => patchTarget({ enabled: event.target.checked }).catch(reportError));
 byId("notifyNew").addEventListener("change", (event) => patchTarget({ notify_new: event.target.checked }).catch(reportError));
@@ -2220,6 +2720,7 @@ byId("siteSelect").addEventListener("change", (event) => loadMovies(event.target
 byId("movieSelect").addEventListener("change", (event) => loadFormats(event.target.value));
 byId("formatSelect").addEventListener("change", updateSelectionPreview);
 byId("targetForm").addEventListener("submit", (event) => createTarget(event).catch(reportError));
+byId("deleteTargetForm").addEventListener("submit", (event) => deleteCurrentTarget(event).catch(reportError));
 byId("bulkThresholdForm").addEventListener("submit", (event) => applyBulkThreshold(event).catch(reportError));
 byId("pollSettingsForm").addEventListener("submit", (event) => savePollSettings(event).catch(reportError));
 byId("bulkThreshold").addEventListener("input", (event) => {
@@ -2237,6 +2738,9 @@ byId("bulkThreshold").addEventListener("input", (event) => {
 byId("telegramForm").addEventListener("submit", (event) => saveTelegram(event).catch(reportError));
 byId("loadChats").addEventListener("click", () => loadChats().catch(reportError));
 byId("testTelegram").addEventListener("click", () => testTelegram().catch(reportError));
+byId("enableWebPush").addEventListener("click", () => enableWebPush().catch(reportError));
+byId("disableWebPush").addEventListener("click", () => disableWebPush().catch(reportError));
+byId("testWebPush").addEventListener("click", () => testWebPush().catch(reportError));
 byId("activityFilterForm").addEventListener("submit", (event) => applyActivityFilters(event).catch(reportError));
 byId("resetActivityFilters").addEventListener("click", () => resetActivityFilters().catch(reportError));
 byId("prevActivityPage").addEventListener("click", () => changeActivityPage(-1).catch(reportError));
@@ -2254,6 +2758,7 @@ initializePathView();
 updateLiveTimes();
 loadBootstrap({ preserveSelection: false })
   .then(async () => {
+    await initializeWebPush();
     await monitorIncreaseAlerts();
     if (activityPath) await loadActivityPage(null, { page: 1, reset: true });
   })

@@ -12,7 +12,7 @@ x-moviemax-service: &moviemax-service
     CONSOLE_WEB_PORT: "8000"
     CONSOLE_PUBLIC_ORIGIN: "${CONSOLE_PUBLIC_ORIGIN:-https://max.wondering.kr}"
     CONSOLE_ALLOWED_HOSTS: "${CONSOLE_ALLOWED_HOSTS:-max.wondering.kr,127.0.0.1,localhost}"
-    SEED_DEFAULT_TARGET: "${SEED_DEFAULT_TARGET:-true}"
+    SEED_DEFAULT_TARGET: "${SEED_DEFAULT_TARGET:-false}"
     TZ: Asia/Seoul
   volumes:
     - moviemax-data:/data

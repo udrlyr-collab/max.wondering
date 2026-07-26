@@ -1,8 +1,8 @@
 # MovieMax
 
-MovieMax는 CGV 영화의 선택한 상영 포맷별 회차를 주기적으로 조회하고, 새 예매 회차·예매 오픈·추적 중인 회차의 잔여석 증가를 Telegram과 열린 웹 콘솔로 알리는 개인용 관리 콘솔입니다. 관리자 화면에서는 날짜, 시작·종료 시각, 상영관, 포맷, 예매 상태, 잔여석/전체 좌석을 확인할 수 있습니다.
+MovieMax는 CGV 영화의 선택한 상영 포맷별 회차를 주기적으로 조회하고, 새 예매 회차·예매 오픈·추적 중인 회차의 잔여석 증가를 Telegram, 브라우저 Web Push, 열린 웹 콘솔로 알리는 개인용 관리 콘솔입니다. 관리자 화면에서는 날짜, 시작·종료 시각, 상영관, 포맷, 예매 상태, 잔여석/전체 좌석을 확인할 수 있습니다.
 
-기본 설정은 CGV 용산아이파크몰의 `오디세이` IMAX 대상을 처음 데이터베이스에 생성합니다. 콘솔에서는 극장·영화·상영 포맷을 순서대로 골라 2D, 4DX, SCREENX, IMAX 등 CGV가 현재 반환하는 포맷을 별도 대상으로 추가할 수 있습니다.
+기본값에서는 감시 대상을 자동 생성하지 않습니다. 콘솔에서 극장·영화·상영 포맷을 순서대로 골라 2D, 4DX, SCREENX, IMAX 등 CGV가 현재 반환하는 포맷을 별도 대상으로 추가할 수 있습니다. `SEED_DEFAULT_TARGET=true`를 명시한 설치만 환경변수의 기본 대상을 생성합니다.
 
 > 2026-07-26 기준 `max.wondering.kr`의 Lightsail 배포, HTTPS, Caddy 인증, CGV 실조회와 감지 워커 동작을 확인했습니다. Telegram 봇은 관리자가 BotFather에서 발급한 토큰과 Chat ID를 콘솔에 저장해야 활성화됩니다.
 
@@ -12,12 +12,14 @@ MovieMax는 CGV 영화의 선택한 상영 포맷별 회차를 주기적으로 �
 
 - CGV 극장·현재 상영 영화·상영 포맷을 선택해 감시 대상 추가
 - 감시 대상 활성화/비활성화
+- 감시 대상과 그 대상의 회차·좌석 이력·알림 기록을 함께 삭제
 - 새 회차 및 예매 오픈 알림 활성화/비활성화
 - 새로 발견한 회차의 좌석 증가 알림 자동 활성화/비활성화
 - 특정 회차의 좌석 증가 알림과 회차별 최소 증가 기준 설정
 - 날짜·시간·상영관·포맷·예매 상태·잔여석/전체 좌석 확인
 - 즉시 조회 요청, 워커 상태와 최근 알림 이벤트 확인
 - Telegram 봇 토큰과 알림 채팅 연결, 시험 메시지 전송
+- 기기별 브라우저 Web Push 연결·시험·해제
 
 알림 판정은 다음과 같습니다.
 
@@ -31,9 +33,9 @@ MovieMax는 CGV 영화의 선택한 상영 포맷별 회차를 주기적으로 �
 구성은 다음 세 Compose 서비스와 하나의 named volume으로 이루어집니다.
 
 ```text
-브라우저 -> web 관리자 콘솔 ─┐
-                             ├─ moviemax-data (SQLite)
-CGV/Telegram <- worker ──────┘
+브라우저 -> web 관리자 콘솔 ─────────┐
+                                      ├─ moviemax-data (SQLite)
+CGV/Telegram/Web Push <- worker ──────┘
               migrate: DB 초기화 후 종료
 ```
 
@@ -43,9 +45,10 @@ CGV/Telegram <- worker ──────┘
 
 - `compose.yaml`은 관리자 콘솔을 호스트의 `127.0.0.1:8787`에만 바인딩합니다.
 - 인터넷에 공개할 때는 기존 Caddy, VPN 또는 별도 접근 제어 계층에서 반드시 인증해야 합니다. 아래 Lightsail 예시는 HTTPS와 Caddy `basic_auth`를 사용합니다.
-- Telegram 봇 토큰은 `APP_ENCRYPTION_KEY`로 암호화해 SQLite에 저장하며 화면/API에 다시 노출하지 않습니다. Chat ID와 나머지 콘솔 상태도 같은 SQLite DB에 저장됩니다.
+- Telegram 봇 토큰, Web Push 구독 주소·암호화 키, VAPID 개인 키는 `APP_ENCRYPTION_KEY`로 암호화해 SQLite에 저장하며 화면/API에 다시 노출하지 않습니다. 공개 VAPID 키, Chat ID와 나머지 콘솔 상태도 같은 SQLite DB에 저장됩니다.
 - `APP_ENCRYPTION_KEY`를 잃거나 바꾸면 기존 봇 토큰을 복호화할 수 없습니다. DB와 암호화 키를 함께, 서로 안전한 위치에 백업해야 합니다.
 - `.env`, `secrets/`, 기본 `data/` 경로의 SQLite DB를 버전 관리에 추가하지 마세요. 현재 `.gitignore`와 `.dockerignore`에서 이 기본 경로들이 제외되어 있습니다.
+- 콘솔의 감시 대상 삭제는 현재 활성 SQLite DB의 관련 행을 모두 제거합니다. 삭제 전에 만든 별도 DB 백업 파일은 자동으로 수정하거나 폐기하지 않습니다.
 
 ## 로컬 실행: Docker Compose
 
@@ -166,14 +169,14 @@ python -m moviemax check-cgv
 | `CONSOLE_ALLOWED_HOSTS` | 허용할 HTTP Host를 쉼표로 구분한 목록. 공개 도메인을 반드시 포함해야 합니다. 인증 설정은 아닙니다. |
 | `CONSOLE_WEB_HOST`, `CONSOLE_WEB_PORT` | 직접 실행 시 웹 리슨 주소와 포트. Compose 내부에서는 `0.0.0.0:8000`, 호스트에서는 `127.0.0.1:8787`로 고정됩니다. |
 | `CONSOLE_WORKER_TICK_SECONDS` | 워커가 할 일을 다시 확인하는 간격. 허용 범위는 1~30초이며 대상별 CGV 조회 주기와는 다릅니다. |
-| `SEED_DEFAULT_TARGET` | `true`이면 새 DB에 환경변수로 정의한 기본 대상을 한 번 생성합니다. 기존 대상은 재시작 시 이 값으로 덮어쓰지 않습니다. |
+| `SEED_DEFAULT_TARGET` | 기본값 `false`. `true`이면 기본 대상이 없을 때 환경변수 값으로 다시 생성하므로 운영 콘솔에서는 삭제 영속성을 위해 `false`를 사용합니다. |
 | `CGV_COMPANY_CODE` | 기본 대상의 CGV 회사 코드. 현재 예시는 `A420`입니다. |
 | `CGV_SITE_NO`, `CGV_SITE_NAME` | 처음 생성할 기본 극장 번호와 표시 이름. 현재 예시는 용산아이파크몰 `0013`입니다. |
 | `CGV_MOVIE_NO`, `CGV_MOVIE_NAME` | 처음 생성할 기본 영화 번호와 표시 이름. 현재 예시는 오디세이 `30001323`입니다. |
 | `CGV_FORMAT_CODE` | 기본 대상의 CGV 상영 포맷 코드. 값이 있으면 정확히 일치하는 코드만 조회합니다. 콘솔에서 추가한 대상은 CGV 카탈로그의 현재 코드를 자동 저장합니다. |
 | `CGV_FORMAT_KEYWORD`, `CGV_SCREEN_GRADE_CODE` | 코드가 없는 기존 기본 대상의 호환 필터. 현재 IMAX 예시는 `IMAX`, `0301`입니다. |
 | `POLL_INTERVAL_SECONDS` | 처음 생성하는 기본 대상의 조회 주기. 30초 미만은 거부되며 예시는 60초입니다. 콘솔에서 새로 추가한 대상은 현재 60초로 생성됩니다. |
-| `REQUEST_TIMEOUT_SECONDS` | CGV와 Telegram 요청 제한 시간. |
+| `REQUEST_TIMEOUT_SECONDS` | CGV, Telegram, Web Push 요청 제한 시간. |
 | `REQUEST_GAP_SECONDS` | 여러 날짜의 CGV 일정을 연속 조회할 때 요청 사이에 두는 간격. |
 | `BACKOFF_MAX_SECONDS` | CGV 조회 실패 시 지수 백오프의 상한. `POLL_INTERVAL_SECONDS`보다 작을 수 없습니다. |
 | `TELEGRAM_MAX_ATTEMPTS`, `TELEGRAM_RETRY_BASE_SECONDS` | Telegram 발송 재시도 횟수와 기본 지연 시간. 한도를 넘거나 재시도 불가능한 오류는 dead-letter로 기록합니다. |
@@ -194,6 +197,12 @@ Telegram 공식 안내에 따라 [@BotFather](https://t.me/BotFather)에서 봇�
 7. `시험 메시지`를 눌러 휴대폰에서 수신 여부를 확인합니다.
 
 저장 시 서버가 Telegram `getMe` 요청으로 토큰을 확인합니다. `채팅 찾기`는 Telegram `getUpdates` 결과에서 최근 메시지를 보낸 채팅을 찾습니다. 저장된 토큰을 바꿀 때만 토큰 필드를 다시 입력하면 됩니다.
+
+## 브라우저 Web Push
+
+콘솔의 `브라우저 알림`에서 `이 기기 알림 켜기`를 누르면 현재 기기의 알림 권한을 요청하고 Push 구독을 서버에 암호화해 저장합니다. 서버 워커는 추적 중인 회차에서 회차별 기준 이상으로 잔여석이 증가한 이벤트만 기기별 전달 큐에 추가합니다. Telegram 설정이나 웹 페이지의 열림 여부와 관계없이 각 Push 서비스로 발송합니다.
+
+iPhone·iPad에서는 사이트를 홈 화면에 추가한 뒤 홈 화면의 웹 앱에서 이 버튼을 눌러야 합니다. 권한 요청은 자동 실행하지 않습니다. `시험 알림`으로 현재 기기의 서버 발송 경로를 확인할 수 있고, `이 기기 알림 끄기`는 브라우저 구독과 서버의 해당 기기 구독을 함께 제거합니다.
 
 ## AWS Lightsail Ubuntu + 기존 Caddy 배포
 
@@ -363,7 +372,7 @@ sudo docker compose -f compose.yaml -f compose.secrets.yaml up -d --remove-orpha
 sudo docker compose -f compose.yaml -f compose.secrets.yaml ps
 ```
 
-`moviemax-data` volume에는 SQLite DB, 상영 회차 이력, 알림 outbox와 워커 heartbeat가 들어 있습니다. 업데이트 전에 volume과 `secrets/app_encryption_key`를 모두 백업하세요. `down -v` 또는 `docker volume rm moviemax-data`는 데이터를 삭제합니다.
+`moviemax-data` volume에는 SQLite DB, 상영 회차 이력, Telegram/Web Push 전달 상태, Push 구독·VAPID 키와 워커 heartbeat가 들어 있습니다. 업데이트 전에 volume과 `secrets/app_encryption_key`를 모두 백업하세요. `down -v` 또는 `docker volume rm moviemax-data`는 데이터를 삭제합니다.
 
 ## CGV 비공식 API 의존성과 장애 판단
 

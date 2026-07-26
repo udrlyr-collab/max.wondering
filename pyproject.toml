@@ -5,13 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moviemax-cgv-monitor"
 version = "0.1.0"
-description = "CGV screening availability monitor with Telegram notifications"
+description = "CGV screening availability monitor with Telegram and Web Push alerts"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "cryptography==49.0.0",
   "curl-cffi==0.15.0",
   "fastapi==0.139.2",
+  "pywebpush==2.3.0",
   "uvicorn==0.51.0",
 ]
 

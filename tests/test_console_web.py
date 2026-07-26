@@ -13,7 +13,8 @@ from fastapi.testclient import TestClient
 from moviemax.console_config import ConsoleSettings
 from moviemax.console_store import ConsoleStore
 from moviemax.console_web import create_app
-from tests.test_console_store import screening
+from moviemax.web_push import WebPushError
+from tests.test_console_store import screening, web_push_subscription
 
 
 class FakeCatalogClient:
@@ -78,6 +79,23 @@ class FakeTelegramClient:
 
     def send_message(self, message: str) -> None:
         self.sent_messages.append((self.token, self.chat_id, message))
+
+
+class FakeWebPushClient:
+    sent: ClassVar[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+    error: ClassVar[WebPushError | None] = None
+
+    def __init__(self, _private_key: str, _subject: str, _timeout: float) -> None:
+        pass
+
+    def send(
+        self,
+        subscription_info: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        if self.error is not None:
+            raise self.error
+        self.sent.append((subscription_info, payload))
 
 
 @pytest.fixture
@@ -455,3 +473,233 @@ def test_console_serves_modernist_assets_without_secrets(console_context) -> Non
     assert "setInterval(updateLiveTimes, 1000)" in script.text
     combined_assets = page.text + stylesheet.text + script.text
     assert re.search(r"\b\d{8,12}:AA[A-Za-z0-9_-]{20,}\b", combined_assets) is None
+
+
+def test_target_delete_api_removes_history_and_rejects_stale_versions(
+    console_context,
+) -> None:
+    settings, store, _catalog, client = console_context
+    created = client.post(
+        "/api/v1/targets",
+        json=target_payload(),
+        headers=mutation_headers(settings),
+    ).json()["target"]
+    original = screening(free_seats=1)
+    store.apply_snapshot(created["id"], created["version"], [original])
+    screening_id = store.list_screenings(created["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        created["id"],
+        created["version"],
+        [screening(free_seats=2)],
+    )
+
+    no_csrf = client.request(
+        "DELETE",
+        f"/api/v1/targets/{created['id']}",
+        json={"version": created["version"]},
+    )
+    assert no_csrf.status_code == 403
+
+    updated = client.patch(
+        f"/api/v1/targets/{created['id']}",
+        json={"version": created["version"], "notify_new": False},
+        headers=mutation_headers(settings),
+    ).json()["target"]
+    stale = client.request(
+        "DELETE",
+        f"/api/v1/targets/{created['id']}",
+        json={"version": created["version"]},
+        headers=mutation_headers(settings),
+    )
+    assert stale.status_code == 409
+
+    deleted = client.request(
+        "DELETE",
+        f"/api/v1/targets/{created['id']}",
+        json={"version": updated["version"]},
+        headers=mutation_headers(settings),
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == {
+        "targets": 1,
+        "screenings": 1,
+        "watches": 1,
+        "seat_history": 2,
+        "notifications": 1,
+        "web_push_deliveries": 0,
+    }
+    assert client.get("/api/v1/bootstrap").json()["targets"] == []
+    assert client.get("/api/v1/activity").json()["items"] == []
+    missing = client.request(
+        "DELETE",
+        f"/api/v1/targets/{created['id']}",
+        json={"version": updated["version"]},
+        headers=mutation_headers(settings),
+    )
+    assert missing.status_code == 404
+
+
+def test_web_push_subscription_test_and_removal_are_device_scoped(
+    console_context,
+    monkeypatch,
+) -> None:
+    settings, store, _catalog, client = console_context
+    subscription = web_push_subscription()
+    payload = {
+        "endpoint": subscription["endpoint"],
+        "expiration_time": None,
+        "keys": {
+            "p256dh": subscription["p256dh"],
+            "auth": subscription["auth"],
+        },
+    }
+    bootstrap = client.get("/api/v1/bootstrap").json()
+    assert bootstrap["web_push"]["configured"] is True
+    assert bootstrap["web_push"]["subscription_count"] == 0
+    assert "private_key" not in json.dumps(bootstrap["web_push"])
+
+    saved = client.put(
+        "/api/v1/web-push/subscription",
+        json=payload,
+        headers=mutation_headers(settings),
+    )
+    assert saved.status_code == 200
+    assert saved.json()["subscription"]["active"] is True
+    assert saved.json()["web_push"]["subscription_count"] == 1
+
+    store.disable_web_push_subscription_by_id(
+        saved.json()["subscription"]["id"],
+        "permanent failure",
+    )
+    automatic_sync = client.put(
+        "/api/v1/web-push/subscription",
+        json=payload,
+        headers=mutation_headers(settings),
+    )
+    assert automatic_sync.status_code == 200
+    assert automatic_sync.json()["subscription"]["active"] is False
+    assert automatic_sync.json()["subscription"]["requires_resubscribe"] is True
+    assert automatic_sync.json()["web_push"]["subscription_count"] == 0
+
+    explicit_reactivation = client.put(
+        "/api/v1/web-push/subscription",
+        json={**payload, "reactivate": True},
+        headers=mutation_headers(settings),
+    )
+    assert explicit_reactivation.status_code == 200
+    assert explicit_reactivation.json()["subscription"]["active"] is True
+    assert explicit_reactivation.json()["subscription"]["requires_resubscribe"] is False
+    assert explicit_reactivation.json()["web_push"]["subscription_count"] == 1
+
+    invalid = client.put(
+        "/api/v1/web-push/subscription",
+        json={**payload, "endpoint": "https://127.0.0.1/push"},
+        headers=mutation_headers(settings),
+    )
+    assert invalid.status_code == 422
+
+    FakeWebPushClient.sent.clear()
+    FakeWebPushClient.error = None
+    monkeypatch.setattr("moviemax.console_web.WebPushClient", FakeWebPushClient)
+    tested = client.post(
+        "/api/v1/web-push/test",
+        json={"endpoint": subscription["endpoint"]},
+        headers=mutation_headers(settings),
+    )
+    assert tested.status_code == 200
+    assert tested.json() == {"sent": True}
+    assert FakeWebPushClient.sent[0][1]["tag"] == "moviemax-web-push-test"
+
+    FakeWebPushClient.error = WebPushError(
+        "forbidden",
+        retryable=False,
+        status_code=403,
+    )
+    permanently_rejected = client.post(
+        "/api/v1/web-push/test",
+        json={"endpoint": subscription["endpoint"]},
+        headers=mutation_headers(settings),
+    )
+    assert permanently_rejected.status_code == 410
+    assert permanently_rejected.json()["requires_resubscribe"] is True
+    assert client.get("/api/v1/bootstrap").json()["web_push"]["subscription_count"] == 0
+
+    automatic_sync = client.put(
+        "/api/v1/web-push/subscription",
+        json=payload,
+        headers=mutation_headers(settings),
+    )
+    assert automatic_sync.json()["subscription"]["active"] is False
+    client.put(
+        "/api/v1/web-push/subscription",
+        json={**payload, "reactivate": True},
+        headers=mutation_headers(settings),
+    )
+
+    FakeWebPushClient.error = WebPushError(
+        "service unavailable",
+        retryable=True,
+        status_code=503,
+    )
+    retryable_failure = client.post(
+        "/api/v1/web-push/test",
+        json={"endpoint": subscription["endpoint"]},
+        headers=mutation_headers(settings),
+    )
+    assert retryable_failure.status_code == 502
+    assert retryable_failure.json()["requires_resubscribe"] is False
+    assert client.get("/api/v1/bootstrap").json()["web_push"]["subscription_count"] == 1
+    FakeWebPushClient.error = None
+
+    removed = client.request(
+        "DELETE",
+        "/api/v1/web-push/subscription",
+        json={"endpoint": subscription["endpoint"]},
+        headers=mutation_headers(settings),
+    )
+    assert removed.status_code == 200
+    assert removed.json()["removed"] is True
+    assert removed.json()["web_push"]["subscription_count"] == 0
+
+
+def test_console_serves_service_worker_and_install_manifest(console_context) -> None:
+    _settings, _store, _catalog, client = console_context
+
+    worker = client.get("/service-worker.js")
+    manifest = client.get("/manifest.webmanifest")
+
+    assert worker.status_code == 200
+    assert worker.headers["content-type"].startswith("application/javascript")
+    assert worker.headers["cache-control"] == "no-cache"
+    assert worker.headers["service-worker-allowed"] == "/"
+    assert 'self.addEventListener("push"' in worker.text
+    assert manifest.status_code == 200
+    assert manifest.headers["content-type"].startswith("application/manifest+json")
+    assert manifest.json()["display"] == "standalone"
+
+
+def test_booking_redirect_allows_only_https_cgv_urls(console_context) -> None:
+    _settings, _store, _catalog, client = console_context
+    booking_url = "https://cgv.co.kr/cnm/movieBook/movie?siteNo=0013"
+
+    allowed = client.get(
+        "/booking",
+        params={"url": booking_url},
+        follow_redirects=False,
+    )
+    rejected = client.get(
+        "/booking",
+        params={"url": "https://example.com/not-cgv"},
+        follow_redirects=False,
+    )
+    rejected_userinfo = client.get(
+        "/booking",
+        params={"url": "https://example.com@cgv.co.kr/not-cgv"},
+        follow_redirects=False,
+    )
+
+    assert allowed.status_code == 303
+    assert allowed.headers["location"] == booking_url
+    assert rejected.status_code == 400
+    assert rejected_userinfo.status_code == 400

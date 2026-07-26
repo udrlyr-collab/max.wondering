@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from moviemax.console_store import ConsoleStore, StaleVersionError
 from moviemax.models import OutboxEvent, Screening
@@ -47,6 +50,19 @@ def screening(
         control_yn=control_yn,
         booking_url="https://cgv.co.kr/cnm/movieBook/movie?siteNo=0013",
     )
+
+
+def web_push_subscription() -> dict[str, str]:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint,
+    )
+    return {
+        "endpoint": "https://fcm.googleapis.com/fcm/send/test-subscription",
+        "p256dh": base64.urlsafe_b64encode(public_key).rstrip(b"=").decode(),
+        "auth": base64.urlsafe_b64encode(b"0123456789abcdef").rstrip(b"=").decode(),
+    }
 
 
 def test_sqlite_pragmas_health_and_explicit_connection_close(store) -> None:
@@ -608,3 +624,173 @@ def test_metadata_persists_across_store_instances(tmp_path, encryption_key) -> N
     reopened = ConsoleStore(database, encryption_key)
     assert reopened.get_metadata("worker_id") == "worker-1"
     assert reopened.health_check()["quick_check"] == "ok"
+
+
+def test_web_push_vapid_and_subscription_secrets_are_encrypted_and_persistent(
+    tmp_path,
+    encryption_key,
+) -> None:
+    database = tmp_path / "console.sqlite3"
+    store = ConsoleStore(database, encryption_key)
+    first_vapid = store.get_web_push_vapid(include_private=True)
+    subscription = web_push_subscription()
+    saved = store.save_web_push_subscription(**subscription, user_agent="Test Browser")
+
+    reopened = ConsoleStore(database, encryption_key)
+    assert reopened.get_web_push_vapid(include_private=True) == first_vapid
+    assert reopened.get_web_push_subscription(subscription["endpoint"]) == {
+        "id": saved["id"],
+        "endpoint": subscription["endpoint"],
+        "keys": {
+            "p256dh": subscription["p256dh"],
+            "auth": subscription["auth"],
+        },
+    }
+    assert reopened.web_push_status()["subscription_count"] == 1
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            """
+            SELECT endpoint_ciphertext, p256dh_ciphertext, auth_ciphertext
+            FROM web_push_subscriptions WHERE id = ?
+            """,
+            (saved["id"],),
+        ).fetchone()
+        vapid_ciphertext = connection.execute(
+            "SELECT private_key_ciphertext FROM web_push_vapid WHERE id = 1"
+        ).fetchone()[0]
+    persisted = b"".join(bytes(value) for value in row) + bytes(vapid_ciphertext)
+    assert subscription["endpoint"].encode() not in persisted
+    assert subscription["p256dh"].encode() not in persisted
+    assert subscription["auth"].encode() not in persisted
+    assert first_vapid["private_key"].encode() not in persisted
+
+
+def test_web_push_delivery_is_created_only_for_qualifying_seat_increases(
+    store,
+) -> None:
+    target = store.ensure_default_target(auto_track_new=False, notify_new=True)
+    subscription = web_push_subscription()
+    store.save_web_push_subscription(**subscription)
+    original = screening(free_seats=10)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=12)],
+    )
+    store.set_watch(screening_id, True, seat_change_threshold=3)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=14)],
+    )
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=9)],
+    )
+    qualified = replace(original, free_seats=12)
+    store.apply_snapshot(target["id"], target["version"], [qualified])
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [qualified, screening(sequence="2", free_seats=5)],
+    )
+
+    deliveries = store.pending_web_push_deliveries()
+    assert len(deliveries) == 1
+    assert deliveries[0].event.kind == "seat_increases"
+    assert deliveries[0].event.payload["seat_delta"] == 3
+    assert {event["kind"] for event in store.list_outbox()} == {
+        "seat_increases",
+        "new_screenings",
+    }
+
+
+def test_web_push_subscription_does_not_receive_past_events(store) -> None:
+    target = store.ensure_default_target(auto_track_new=False)
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=2)],
+    )
+    assert store.pending_events()[0].kind == "seat_increases"
+    assert store.list_web_push_deliveries() == []
+
+    store.save_web_push_subscription(**web_push_subscription())
+    assert store.list_web_push_deliveries() == []
+
+
+def test_delete_target_removes_all_related_history_and_notification_records(
+    store,
+) -> None:
+    target = store.ensure_default_target(auto_track_new=False, notify_new=False)
+    other = store.create_target(
+        site_no="0001",
+        site_name="강남",
+        movie_no="movie-2",
+        movie_name="다른 영화",
+        format_code="48",
+        format_keyword="IMAX",
+    )
+    subscription = web_push_subscription()
+    store.save_web_push_subscription(**subscription)
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+
+    store.apply_snapshot(
+        target["id"], target["version"], [replace(original, free_seats=2)]
+    )
+    first_event = store.pending_events()[-1]
+    store.mark_sent(first_event.id)
+    store.apply_snapshot(
+        target["id"], target["version"], [replace(original, free_seats=3)]
+    )
+    store.apply_snapshot(
+        target["id"], target["version"], [replace(original, free_seats=4)]
+    )
+    third_event = store.pending_events()[-1]
+    store.mark_dead(third_event.id, "permanent")
+
+    store.apply_snapshot(other["id"], other["version"], [screening(sequence="2")])
+    result = store.delete_target(target["id"], expected_version=target["version"])
+
+    assert result["deleted"] == {
+        "targets": 1,
+        "screenings": 1,
+        "watches": 1,
+        "seat_history": 4,
+        "notifications": 3,
+        "web_push_deliveries": 3,
+    }
+    assert store.get_target(target["id"]) is None
+    assert store.get_target(other["id"]) is not None
+    assert store.list_activity_page(target_id=target["id"])["items"] == []
+    assert store.list_outbox(target_id=target["id"]) == []
+    assert store.list_web_push_deliveries() == []
+    assert len(store.list_screenings(other["id"])) == 1
+    with store._connection() as connection:
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_delete_target_rejects_a_stale_version_without_removing_data(store) -> None:
+    target = store.ensure_default_target()
+    updated = store.update_target(
+        target["id"],
+        expected_version=target["version"],
+        notify_new=False,
+    )
+
+    with pytest.raises(StaleVersionError, match="stale"):
+        store.delete_target(target["id"], expected_version=target["version"])
+
+    assert store.get_target(target["id"])["version"] == updated["version"]

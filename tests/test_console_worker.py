@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar
 
@@ -12,7 +14,8 @@ from moviemax.console_config import ConsoleSettings
 from moviemax.console_store import ConsoleStore
 from moviemax.console_worker import ConsoleWorker, console_worker_health
 from moviemax.telegram import TelegramError
-from tests.test_console_store import screening
+from moviemax.web_push import WebPushError
+from tests.test_console_store import screening, web_push_subscription
 
 
 class FakeTargetCgvClient:
@@ -46,6 +49,25 @@ class FakeTelegramSender:
         if self.error is not None:
             raise self.error
         self.sent.append((self.token, self.chat_id, message))
+
+
+class FakeWebPushSender:
+    sent: ClassVar[list[tuple[dict[str, Any], dict[str, Any]]]] = []
+    attempted: ClassVar[list[dict[str, Any]]] = []
+    error: ClassVar[WebPushError | None] = None
+
+    def __init__(self, _private_key: str, _subject: str, _timeout: float) -> None:
+        pass
+
+    def send(
+        self,
+        subscription_info: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
+        self.attempted.append(subscription_info)
+        if self.error is not None:
+            raise self.error
+        self.sent.append((subscription_info, payload))
 
 
 @pytest.fixture
@@ -283,3 +305,377 @@ def test_worker_heartbeat_health_happy_and_stale_paths(worker_context) -> None:
     )
     with pytest.raises(RuntimeError, match="stale"):
         console_worker_health(settings)
+
+
+def test_web_push_delivers_without_telegram_and_keeps_channel_state_separate(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    store.save_web_push_subscription(**web_push_subscription())
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [screening(free_seats=3)],
+    )
+
+    FakeWebPushSender.sent.clear()
+    FakeWebPushSender.attempted.clear()
+    FakeWebPushSender.error = None
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        FakeWebPushSender,
+    )
+
+    assert worker.deliver_pending() == (0, 0, 0)
+    assert worker.deliver_pending_web_push() == (1, 0, 0)
+    assert len(FakeWebPushSender.sent) == 1
+    payload = FakeWebPushSender.sent[0][1]
+    assert payload["title"] == "잔여석 +2 · 오디세이"
+    assert payload["url"].startswith("https://max.wondering.kr/booking?url=")
+    assert len(store.list_web_push_deliveries(status="sent")) == 1
+    assert len(store.pending_events()) == 1
+
+
+def test_expired_web_push_subscription_is_removed_without_dead_letter(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    store.save_web_push_subscription(**web_push_subscription())
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [screening(free_seats=2)],
+    )
+    FakeWebPushSender.error = WebPushError(
+        "expired",
+        expired=True,
+        status_code=410,
+    )
+    FakeWebPushSender.attempted.clear()
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        FakeWebPushSender,
+    )
+
+    assert worker.deliver_pending_web_push() == (0, 1, 0)
+    assert store.web_push_status()["subscription_count"] == 0
+    assert store.list_web_push_deliveries() == []
+    FakeWebPushSender.error = None
+
+
+def test_retryable_web_push_failure_spends_only_one_request_per_dispatch(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    store.save_web_push_subscription(**web_push_subscription())
+    first = screening(sequence="1", free_seats=1)
+    second = screening(sequence="2", free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [first, second])
+    for item in store.list_screenings(target["id"]):
+        store.set_watch(item["id"], True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(first, free_seats=2), replace(second, free_seats=2)],
+    )
+    assert len(store.pending_web_push_deliveries()) == 2
+
+    FakeWebPushSender.sent.clear()
+    FakeWebPushSender.attempted.clear()
+    FakeWebPushSender.error = WebPushError("timeout", retryable=True)
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        FakeWebPushSender,
+    )
+
+    assert worker.deliver_pending_web_push() == (0, 1, 0)
+    assert len(FakeWebPushSender.attempted) == 1
+    deliveries = store.list_web_push_deliveries(status="pending")
+    assert sorted(item["attempts"] for item in deliveries) == [0, 1]
+    assert store.web_push_status()["subscription_count"] == 1
+    FakeWebPushSender.error = None
+
+
+def test_permanent_web_push_failure_disables_subscription_without_failing_worker(
+    worker_context,
+    monkeypatch,
+) -> None:
+    settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    subscription = web_push_subscription()
+    store.save_web_push_subscription(**subscription)
+    first = screening(sequence="1", free_seats=1)
+    second = screening(sequence="2", free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [first, second])
+    for item in store.list_screenings(target["id"]):
+        store.set_watch(item["id"], True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(first, free_seats=2), replace(second, free_seats=2)],
+    )
+
+    FakeWebPushSender.sent.clear()
+    FakeWebPushSender.attempted.clear()
+    FakeWebPushSender.error = WebPushError(
+        "forbidden",
+        retryable=False,
+        status_code=403,
+    )
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        FakeWebPushSender,
+    )
+
+    assert worker.deliver_pending_web_push() == (0, 1, 2)
+    assert len(FakeWebPushSender.attempted) == 1
+    assert store.web_push_status()["subscription_count"] == 0
+    assert store.pending_web_push_deliveries() == []
+    assert len(store.list_web_push_deliveries(status="dead")) == 2
+
+    # Automatic browser-state synchronization must not reactivate the same
+    # endpoint. The user has to remove it and create a fresh subscription.
+    store.save_web_push_subscription(**subscription)
+    assert store.web_push_status()["subscription_count"] == 0
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(first, free_seats=3), replace(second, free_seats=3)],
+    )
+    assert len(store.list_web_push_deliveries()) == 2
+
+    heartbeat = worker.heartbeat()
+    assert heartbeat["status"] == "ok"
+    assert heartbeat["dead_letters"] == 0
+    assert heartbeat["web_push_dead_letters"] == 1
+    assert console_worker_health(settings)["heartbeat"] == heartbeat
+    FakeWebPushSender.error = None
+
+
+def test_target_delete_waits_for_in_flight_web_push_dispatch(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    store.save_web_push_subscription(**web_push_subscription())
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=2)],
+    )
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+    send_completed = threading.Event()
+    delete_completed = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    class BlockingWebPushSender:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def send(self, _subscription: dict[str, Any], _payload: dict[str, Any]) -> None:
+            send_started.set()
+            if not release_send.wait(2):
+                raise RuntimeError("test did not release Web Push sender")
+            send_completed.set()
+
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        BlockingWebPushSender,
+    )
+
+    def dispatch() -> None:
+        try:
+            worker.deliver_pending_web_push()
+        except BaseException as exc:  # noqa: BLE001 - surfaced in the test thread
+            thread_errors.append(exc)
+
+    def delete() -> None:
+        try:
+            store.delete_target(target["id"], expected_version=target["version"])
+            delete_completed.set()
+        except BaseException as exc:  # noqa: BLE001 - surfaced in the test thread
+            thread_errors.append(exc)
+
+    dispatch_thread = threading.Thread(target=dispatch)
+    dispatch_thread.start()
+    assert send_started.wait(2)
+    delete_thread = threading.Thread(target=delete)
+    delete_thread.start()
+
+    assert not delete_completed.wait(0.1)
+    release_send.set()
+    dispatch_thread.join(2)
+    delete_thread.join(2)
+
+    assert thread_errors == []
+    assert send_completed.is_set()
+    assert delete_completed.is_set()
+    assert store.get_target(target["id"]) is None
+    assert store.list_web_push_deliveries() == []
+
+
+def test_target_delete_waits_for_in_flight_telegram_dispatch(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=2)],
+    )
+    store.save_telegram_config(
+        bot_token="1234567890:worker-secret-token",
+        chat_id="-100123",
+    )
+
+    send_started = threading.Event()
+    release_send = threading.Event()
+    send_completed = threading.Event()
+    delete_completed = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    class BlockingTelegramSender:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def send_message(self, _message: str) -> None:
+            send_started.set()
+            if not release_send.wait(2):
+                raise RuntimeError("test did not release Telegram sender")
+            send_completed.set()
+
+    monkeypatch.setattr(
+        "moviemax.console_worker.TelegramClient",
+        BlockingTelegramSender,
+    )
+
+    def dispatch() -> None:
+        try:
+            worker.deliver_pending()
+        except BaseException as exc:  # noqa: BLE001 - surfaced in the test thread
+            thread_errors.append(exc)
+
+    def delete() -> None:
+        try:
+            store.delete_target(target["id"], expected_version=target["version"])
+            delete_completed.set()
+        except BaseException as exc:  # noqa: BLE001 - surfaced in the test thread
+            thread_errors.append(exc)
+
+    dispatch_thread = threading.Thread(target=dispatch)
+    dispatch_thread.start()
+    assert send_started.wait(2)
+    delete_thread = threading.Thread(target=delete)
+    delete_thread.start()
+
+    assert not delete_completed.wait(0.1)
+    release_send.set()
+    dispatch_thread.join(2)
+    delete_thread.join(2)
+
+    assert thread_errors == []
+    assert send_completed.is_set()
+    assert delete_completed.is_set()
+    assert store.get_target(target["id"]) is None
+    assert store.list_outbox(target_id=target["id"]) == []
+
+
+def test_prefetched_web_push_is_not_sent_after_target_delete_commits(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False)
+    store.save_web_push_subscription(**web_push_subscription())
+    original = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [original])
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(original, free_seats=2)],
+    )
+
+    prefetched = threading.Event()
+    release_prefetch = threading.Event()
+    thread_errors: list[BaseException] = []
+    original_pending = store.pending_web_push_deliveries
+
+    def paused_pending(*args: Any, **kwargs: Any) -> list:
+        deliveries = original_pending(*args, **kwargs)
+        prefetched.set()
+        if not release_prefetch.wait(2):
+            raise RuntimeError("test did not release prefetched delivery")
+        return deliveries
+
+    monkeypatch.setattr(store, "pending_web_push_deliveries", paused_pending)
+    FakeWebPushSender.sent.clear()
+    FakeWebPushSender.attempted.clear()
+    FakeWebPushSender.error = None
+    monkeypatch.setattr(
+        "moviemax.console_worker.WebPushClient",
+        FakeWebPushSender,
+    )
+
+    def dispatch() -> None:
+        try:
+            worker.deliver_pending_web_push()
+        except BaseException as exc:  # noqa: BLE001 - surfaced in the test thread
+            thread_errors.append(exc)
+
+    dispatch_thread = threading.Thread(target=dispatch)
+    dispatch_thread.start()
+    assert prefetched.wait(2)
+    store.delete_target(target["id"], expected_version=target["version"])
+    release_prefetch.set()
+    dispatch_thread.join(2)
+
+    assert thread_errors == []
+    assert FakeWebPushSender.attempted == []
+    assert store.get_target(target["id"]) is None
+
+
+def test_target_deleted_during_poll_is_a_normal_worker_cancellation(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target()
+
+    def delete_during_fetch(_target: dict[str, Any]) -> list:
+        store.delete_target(target["id"], expected_version=target["version"])
+        return [screening()]
+
+    monkeypatch.setattr(worker, "fetch_target", delete_during_fetch)
+
+    assert worker.process_target(target) is None
+    assert store.get_target(target["id"]) is None
+    assert store.due_targets() == []
