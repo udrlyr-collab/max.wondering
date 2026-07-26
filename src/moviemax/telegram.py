@@ -108,12 +108,12 @@ def render_event_messages(event: OutboxEvent) -> list[str]:
     if event.kind == "new_screenings":
         return _screening_event_messages(
             event,
-            "🎬 <b>CGV IMAX 새 예매 회차 감지</b>",
+            "🎬 <b>CGV 새 예매 회차 감지</b>",
         )
     if event.kind == "booking_opened":
         return _screening_event_messages(
             event,
-            "🚨 <b>CGV IMAX 예매 오픈 감지</b>",
+            "🚨 <b>CGV 예매 오픈 감지</b>",
         )
     if event.kind in {"seat_increases", "seat_decreases"}:
         changes = event.payload.get("changes", [])
@@ -128,9 +128,9 @@ def render_event_messages(event: OutboxEvent) -> list[str]:
         increasing = event.kind == "seat_increases"
         header = [
             (
-                "🎟️ <b>CGV IMAX 잔여석 증가 감지</b>"
+                "🎟️ <b>CGV 잔여석 증가 감지</b>"
                 if increasing
-                else "🔻 <b>CGV IMAX 잔여석 감소 감지</b>"
+                else "🔻 <b>CGV 잔여석 감소 감지</b>"
             ),
             f"<b>{_safe(first.movie_name)}</b> · CGV {_safe(first.site_name)}",
             (

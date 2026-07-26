@@ -20,7 +20,7 @@ from moviemax.telegram import TelegramClient
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="CGV Yongsan IMAX Telegram monitor")
+    parser = argparse.ArgumentParser(description="CGV screening Telegram monitor")
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("run", help="run the continuous monitor")
     subparsers.add_parser(
@@ -57,7 +57,7 @@ def _print_screenings(settings: Settings) -> int:
     dates = client.get_screening_dates(movie_no)
     screenings = []
     for screening_date in dates:
-        screenings.extend(client.get_imax_screenings(movie_no, screening_date))
+        screenings.extend(client.get_screenings(movie_no, screening_date))
     print(
         f"CGV {settings.site_name} · {settings.movie_name} · {settings.format_keyword}"
     )
@@ -78,7 +78,7 @@ def _print_screenings(settings: Settings) -> int:
             f"{item.screening_date} {start}-{end} {item.screen_name} {item.format_name} {free}"
         )
     if not screenings:
-        print("현재 조회된 대상 IMAX 회차가 없습니다.")
+        print("현재 조회된 대상 포맷 회차가 없습니다.")
     return 0
 
 
@@ -102,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
                         site_name=base_settings.site_name,
                         movie_no=base_settings.movie_no,
                         movie_name=base_settings.movie_name,
+                        format_code=base_settings.format_code,
                         format_keyword=base_settings.format_keyword,
                         screen_grade_code=base_settings.screen_grade_code,
                         poll_interval_seconds=base_settings.poll_interval_seconds,
@@ -179,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                 settings.telegram_bot_token,
                 settings.telegram_chat_id,
                 settings.request_timeout_seconds,
-            ).send_message("✅ MovieMax CGV IMAX 알림 테스트가 성공했습니다.")
+            ).send_message("✅ MovieMax CGV 상영 알림 테스트가 성공했습니다.")
             print("sent")
             return 0
         if args.command == "outbox-status":

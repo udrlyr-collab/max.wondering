@@ -60,6 +60,8 @@ class TargetCreate(StrictModel):
     site_name: str
     movie_no: str
     movie_name: str
+    format_code: str
+    format_name: str
     poll_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
     poll_jitter_seconds: int | None = Field(
         default=None,
@@ -72,20 +74,20 @@ class TargetCreate(StrictModel):
     def validate_site_no(cls, value: str) -> str:
         return _identifier(value, "극장 번호")
 
-    @field_validator("movie_no")
+    @field_validator("movie_no", "format_code")
     @classmethod
     def validate_movie_no(cls, value: str) -> str:
-        return _identifier(value, "영화 번호")
+        return _identifier(value, "영화 또는 포맷 번호")
 
     @field_validator("site_name")
     @classmethod
     def validate_site_name(cls, value: str) -> str:
         return _display_name(value, "극장 이름")
 
-    @field_validator("movie_name")
+    @field_validator("movie_name", "format_name")
     @classmethod
     def validate_movie_name(cls, value: str) -> str:
-        return _display_name(value, "영화 이름")
+        return _display_name(value, "영화 또는 포맷 이름")
 
 
 class TargetUpdate(StrictModel):
@@ -214,6 +216,7 @@ def create_app(
             site_name=base_settings.site_name,
             movie_no=base_settings.movie_no,
             movie_name=base_settings.movie_name,
+            format_code=base_settings.format_code,
             format_keyword=base_settings.format_keyword,
             screen_grade_code=base_settings.screen_grade_code,
             poll_interval_seconds=base_settings.poll_interval_seconds,
@@ -377,7 +380,7 @@ def create_app(
             validated = _identifier(site_no, "극장 번호")
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
-        movies = cgv.get_site_imax_movies(validated)
+        movies = cgv.get_site_movies(validated)
         return {
             "movies": [
                 {
@@ -399,8 +402,9 @@ def create_app(
                 site_name=payload.site_name,
                 movie_no=payload.movie_no,
                 movie_name=payload.movie_name,
-                format_keyword="IMAX",
-                screen_grade_code="0301",
+                format_code=payload.format_code,
+                format_keyword=payload.format_name,
+                screen_grade_code="",
                 enabled=True,
                 notify_new=True,
                 auto_track_new=False,

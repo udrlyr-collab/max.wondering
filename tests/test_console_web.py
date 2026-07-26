@@ -35,13 +35,21 @@ class FakeCatalogClient:
             }
         ]
 
-    def get_site_imax_movies(self, site_no: str) -> list[dict[str, Any]]:
+    def get_site_movies(self, site_no: str) -> list[dict[str, Any]]:
         self.movie_site_calls.append(site_no)
         return [
             {
                 "movie_no": "30001323",
                 "movie_name": "오디세이",
-                "formats": ["IMAX LASER 2D"],
+                "formats": [
+                    {
+                        "format_code": "48",
+                        "format_name": "IMAX LASER 2D",
+                        "screen_grade_names": ["아이맥스"],
+                        "screen_names": ["IMAX관"],
+                        "screening_dates": ["20260810"],
+                    }
+                ],
                 "screening_dates": ["20260810"],
             }
         ]
@@ -103,6 +111,8 @@ def target_payload() -> dict[str, str]:
         "site_name": "용산아이파크몰",
         "movie_no": "30001323",
         "movie_name": "오디세이",
+        "format_code": "48",
+        "format_name": "IMAX LASER 2D",
     }
 
 
@@ -152,6 +162,7 @@ def test_catalog_and_target_create_read_update_refresh(console_context) -> None:
     movies = client.get("/api/v1/catalog/sites/0013/movies")
     assert movies.status_code == 200
     assert movies.json()["movies"][0]["movie_no"] == "30001323"
+    assert movies.json()["movies"][0]["formats"][0]["format_code"] == "48"
     assert catalog.movie_site_calls == ["0013"]
     assert client.get("/api/v1/catalog/sites/bad!id/movies").status_code == 400
 
@@ -164,6 +175,8 @@ def test_catalog_and_target_create_read_update_refresh(console_context) -> None:
     created = created_response.json()["target"]
     assert created["notify_new"] is True
     assert created["auto_track_new"] is False
+    assert created["format_code"] == "48"
+    assert created["format_keyword"] == "IMAX LASER 2D"
 
     duplicate = client.post(
         "/api/v1/targets",

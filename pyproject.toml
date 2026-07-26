@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "moviemax-cgv-monitor"
 version = "0.1.0"
-description = "CGV Yongsan IMAX availability monitor with Telegram notifications"
+description = "CGV screening availability monitor with Telegram notifications"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

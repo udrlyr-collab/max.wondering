@@ -29,7 +29,7 @@ class FakeTargetCgvClient:
         self.date_calls.append(movie_no)
         return sorted(self.schedules)
 
-    def get_imax_screenings(self, movie_no: str, screening_date: str) -> list:
+    def get_screenings(self, movie_no: str, screening_date: str) -> list:
         self.schedule_calls.append((movie_no, screening_date))
         return self.schedules[screening_date]
 
@@ -80,6 +80,7 @@ def test_fetch_target_uses_target_specific_cgv_client(
         site_name="강남",
         movie_no="movie-2",
         movie_name="두 번째 영화",
+        format_code="44",
         format_keyword="IMAX",
         screen_grade_code="0301",
     )
@@ -99,6 +100,7 @@ def test_fetch_target_uses_target_specific_cgv_client(
     assert configured.site_no == "0001"
     assert configured.site_name == "강남"
     assert configured.movie_no == "movie-2"
+    assert configured.format_code == "44"
     assert FakeTargetCgvClient.date_calls == ["movie-2"]
     assert FakeTargetCgvClient.schedule_calls == [
         ("movie-2", "20260810"),

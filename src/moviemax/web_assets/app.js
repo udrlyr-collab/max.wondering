@@ -8,6 +8,7 @@ const state = {
   recentAlerts: [],
   telegram: {},
   catalog: null,
+  catalogMovies: [],
   filter: "all",
   refreshing: false,
   refreshRequest: null,
@@ -188,16 +189,17 @@ function notifyIncreaseAlert(alert) {
   const entry = entries[0] || { screening: {}, previous: {}, changes: [] };
   const screening = recordOrEmpty(entry.screening);
   const seatChange = activitySeatChange(alert, entry);
-  const movieName = screening.movie_name || "IMAX";
+  const movieName = screening.movie_name || "영화 정보 미확인";
+  const formatName = screening.format_name || "상영 포맷 미확인";
   const session = activitySessionText(screening);
   const deltaText = seatChange ? `${seatChange.before} → ${seatChange.after}석` : "잔여석 변동";
   const bookingUrl = activityBookingUrl(alert, screening);
   showBrowserNotification(
-    `잔여석 증가 · ${movieName}`,
-    `${session}\n${deltaText}`,
+    `잔여석 증가 · ${movieName} · ${formatName}`,
+    `${session}\n${activityHallText(screening)} · ${deltaText}`,
     bookingUrl,
   );
-  showInPageAlert(`잔여석 증가 감지 · ${movieName} · ${session} · ${deltaText}`, bookingUrl);
+  showInPageAlert(`잔여석 증가 감지 · ${movieName} · ${formatName} · ${session} · ${deltaText}`, bookingUrl);
 }
 
 async function monitorIncreaseAlerts() {
@@ -293,6 +295,19 @@ function displayTime(value) {
 
 function selectedTarget() {
   return state.targets.find((target) => target.id === state.selectedTargetId) || null;
+}
+
+function targetFormatLabel(target) {
+  return target?.format_name || target?.format_keyword || "상영 포맷 미확인";
+}
+
+function formatBadge(formatName) {
+  const normalized = String(formatName || "").toUpperCase();
+  if (normalized.includes("IMAX")) return "IM";
+  if (normalized.includes("4DX")) return "4D";
+  if (normalized.includes("SCREENX")) return "SX";
+  const compact = (normalized.match(/[A-Z0-9]+/g) || []).join("");
+  return compact.slice(0, 2) || "CG";
 }
 
 function refreshPhase(target) {
@@ -487,12 +502,13 @@ function renderTargets() {
     const active = target.id === state.selectedTargetId;
     const dotClass = target.last_error ? "is-error" : target.enabled ? "is-on" : "";
     const statusLabel = target.last_error ? "조회 오류" : target.enabled ? "감지 실행 중" : "감지 중지";
+    const formatName = targetFormatLabel(target);
     return `
-      <button class="target-item ${active ? "is-active" : ""}" data-target-id="${target.id}" type="button" aria-pressed="${active}" aria-label="${escapeHtml(target.site_name)} ${escapeHtml(target.movie_name)} 선택, ${statusLabel}">
-        <span class="target-glyph">IM</span>
+      <button class="target-item ${active ? "is-active" : ""}" data-target-id="${target.id}" type="button" aria-pressed="${active}" aria-label="${escapeHtml(target.site_name)} ${escapeHtml(target.movie_name)} ${escapeHtml(formatName)} 선택, ${statusLabel}">
+        <span class="target-glyph">${escapeHtml(formatBadge(formatName))}</span>
         <span class="target-copy">
           <strong>${escapeHtml(target.movie_name)}</strong>
-          <small>${escapeHtml(target.site_name)}</small>
+          <small>${escapeHtml(target.site_name)} · ${escapeHtml(formatName)}</small>
         </span>
         <span class="mini-dot ${dotClass}" aria-hidden="true"></span>
       </button>`;
@@ -554,8 +570,10 @@ function renderDashboard() {
   byId("dashboardContent").classList.toggle("is-hidden", !target);
   if (!target) return;
 
-  byId("targetKicker").textContent = `CGV ${target.site_name} · IMAX`;
+  const formatName = targetFormatLabel(target);
+  byId("targetKicker").textContent = `CGV ${target.site_name} · ${formatName}`;
   byId("targetTitle").textContent = target.movie_name;
+  byId("scheduleTitle").textContent = `${formatName} 상영 회차`;
   const pollJitter = Number(target.poll_jitter_seconds ?? 0);
   byId("targetMeta").textContent = `극장 ${target.site_no} · 영화 ${target.movie_no} · 기본 ${target.poll_interval_seconds}초 + 무작위 최대 ${pollJitter}초`;
   byId("targetEnabled").checked = Boolean(target.enabled);
@@ -595,7 +613,7 @@ function renderSchedule() {
   if (status.textContent !== statusText) status.textContent = statusText;
 
   if (!rows.length) {
-    byId("scheduleList").innerHTML = '<div class="schedule-empty">조건에 맞는 IMAX 회차가 없습니다.<br>감지 실행 후 잠시 기다리거나 지금 조회를 눌러주세요.</div>';
+    byId("scheduleList").innerHTML = '<div class="schedule-empty">조건에 맞는 상영 회차가 없습니다.<br>감지 실행 후 잠시 기다리거나 지금 조회를 눌러주세요.</div>';
     return;
   }
 
@@ -711,9 +729,9 @@ function renderScreeningHistory(item) {
 
 function activityTitle(item) {
   const titles = {
-    new_screenings: "새 IMAX 회차 감지",
-    booking_opened: "IMAX 예매 오픈",
-    booking_closed: "IMAX 예매 종료",
+    new_screenings: "새 상영 회차 감지",
+    booking_opened: "예매 오픈",
+    booking_closed: "예매 종료",
     seat_increases: "잔여석 증가",
     seat_decreases: "잔여석 감소",
     total_seats_changed: "전체 좌석 변경",
@@ -901,6 +919,7 @@ function activityOverviewHtml(item) {
   const seatChange = activitySeatChange(item, entry);
   const additional = entries.length > 1 ? ` 외 ${entries.length - 1}개 회차` : "";
   const timestamp = activityTimestamp(item);
+  const formatName = screening.format_name || "상영 포맷 미확인";
   const remaining = screening.free_seats === undefined
     ? "확인 불가"
     : `${Number(screening.free_seats).toLocaleString("ko-KR")} / ${Number(screening.total_seats || 0).toLocaleString("ko-KR")}석`;
@@ -912,7 +931,7 @@ function activityOverviewHtml(item) {
       <span class="activity-signal" aria-label="${escapeHtml(activityTitle(item))}">${escapeHtml(activitySignalText(item, entry))}</span>
       <div>
         <strong>${escapeHtml(activityTitle(item))}</strong>
-        <small>${escapeHtml(screening.movie_name || "영화 정보 미확인")}${escapeHtml(additional)}</small>
+        <small>${escapeHtml(screening.movie_name || "영화 정보 미확인")} · ${escapeHtml(formatName)}${escapeHtml(additional)}</small>
       </div>
       <time class="activity-time" datetime="${escapeHtml(timestamp)}">
         <span>${escapeHtml(humanDateTime(timestamp))}</span>
@@ -921,7 +940,7 @@ function activityOverviewHtml(item) {
     </div>
     <dl class="activity-facts">
       <div><dt>회차 / 일시</dt><dd>${escapeHtml(activitySessionText(screening))}</dd></div>
-      <div><dt>상영관</dt><dd>${escapeHtml(activityHallText(screening))}</dd></div>
+      <div><dt>포맷 / 상영관</dt><dd>${escapeHtml(formatName)} · ${escapeHtml(activityHallText(screening))}</dd></div>
       <div><dt>변동</dt><dd>${escapeHtml(changeText)}</dd></div>
       <div><dt>현재 잔여석</dt><dd>${escapeHtml(remaining)}</dd></div>
     </dl>
@@ -1058,7 +1077,7 @@ function renderActivityTargetFilter() {
   const select = byId("activityTargetFilter");
   const selected = select.value || state.activityLog.filters.targetId;
   select.innerHTML = '<option value="">전체 대상</option>' + state.targets.map((target) => (
-    `<option value="${escapeHtml(target.id)}">${escapeHtml(target.site_name)} · ${escapeHtml(target.movie_name)}</option>`
+    `<option value="${escapeHtml(target.id)}">${escapeHtml(target.site_name)} · ${escapeHtml(target.movie_name)} · ${escapeHtml(targetFormatLabel(target))}</option>`
   )).join("");
   select.value = [...select.options].some((option) => option.value === String(selected))
     ? String(selected)
@@ -1070,7 +1089,7 @@ function activityFilterDescription() {
   const parts = [];
   if (filters.targetId) {
     const target = state.targets.find((item) => String(item.id) === String(filters.targetId));
-    parts.push(target ? `${target.site_name} · ${target.movie_name}` : `대상 ${filters.targetId}`);
+    parts.push(target ? `${target.site_name} · ${target.movie_name} · ${targetFormatLabel(target)}` : `대상 ${filters.targetId}`);
   }
   if (filters.kind) parts.push(activityTitle({ kind: filters.kind }));
   if (filters.screeningId) parts.push(`상영 ID ${filters.screeningId}`);
@@ -1539,39 +1558,113 @@ async function openTargetDialog() {
 
 async function loadMovies(siteNo) {
   const movieSelect = byId("movieSelect");
-  const create = byId("createTarget");
+  state.catalogMovies = [];
   movieSelect.disabled = true;
-  create.disabled = true;
-  movieSelect.innerHTML = '<option value="">IMAX 영화 조회 중…</option>';
-  if (!siteNo) return;
+  byId("createTarget").disabled = true;
+  resetFormatSelect();
+  if (!siteNo) {
+    movieSelect.innerHTML = '<option value="">먼저 극장을 선택하세요</option>';
+    updateSelectionPreview();
+    return;
+  }
+  movieSelect.innerHTML = '<option value="">영화 조회 중…</option>';
   try {
     const data = await api(`/api/v1/catalog/sites/${encodeURIComponent(siteNo)}/movies`);
-    const movies = data.movies || [];
+    if (byId("siteSelect").value !== siteNo) return;
+    const movies = Array.isArray(data.movies) ? data.movies : [];
+    state.catalogMovies = movies;
     movieSelect.innerHTML = movies.length
-      ? '<option value="">영화를 선택하세요</option>' + movies.map((movie) => `<option value="${escapeHtml(movie.movie_no)}" data-movie-name="${escapeHtml(movie.movie_name)}" data-formats="${escapeHtml((movie.formats || []).join(", "))}" data-dates="${escapeHtml((movie.dates || []).join(","))}">${escapeHtml(movie.movie_name)} · ${(movie.dates || []).length}일</option>`).join("")
-      : '<option value="">현재 확인되는 IMAX 영화가 없습니다</option>';
+      ? '<option value="">영화를 선택하세요</option>' + movies.map((movie) => `<option value="${escapeHtml(movie.movie_no)}" data-movie-name="${escapeHtml(movie.movie_name)}">${escapeHtml(movie.movie_name)} · ${(movie.dates || []).length}일</option>`).join("")
+      : '<option value="">현재 확인되는 상영 영화가 없습니다</option>';
     movieSelect.disabled = !movies.length;
+    updateSelectionPreview();
   } catch (error) {
+    if (byId("siteSelect").value !== siteNo) return;
     reportError(error);
+    state.catalogMovies = [];
     movieSelect.innerHTML = '<option value="">영화 목록 조회 실패</option>';
+    updateSelectionPreview();
   }
 }
 
-function updateSelectionPreview() {
+function resetFormatSelect(message = "먼저 영화를 선택하세요") {
+  const formatSelect = byId("formatSelect");
+  formatSelect.disabled = true;
+  formatSelect.innerHTML = `<option value="">${escapeHtml(message)}</option>`;
+}
+
+function selectedCatalogMovie() {
+  const movieNo = byId("movieSelect").value;
+  return state.catalogMovies.find((movie) => String(movie.movie_no) === movieNo) || null;
+}
+
+function selectedCatalogFormat() {
+  const movie = selectedCatalogMovie();
+  const selectedValue = byId("formatSelect").value;
+  if (!movie || selectedValue === "") return null;
+  const selectedIndex = Number(selectedValue);
+  if (!Number.isInteger(selectedIndex)) return null;
+  const format = Array.isArray(movie.formats) ? movie.formats[selectedIndex] : null;
+  const formatCode = String(format?.format_code || "").trim();
+  const formatName = String(format?.format_name || "").trim();
+  return format && formatCode && formatName ? format : null;
+}
+
+function loadFormats(movieNo) {
+  const formatSelect = byId("formatSelect");
+  byId("createTarget").disabled = true;
+  resetFormatSelect();
+  const movie = state.catalogMovies.find((item) => String(item.movie_no) === String(movieNo));
+  if (!movie) {
+    updateSelectionPreview();
+    return;
+  }
+  const formats = Array.isArray(movie.formats) ? movie.formats : [];
+  const options = formats.flatMap((format, index) => {
+    const formatCode = String(format?.format_code || "").trim();
+    const formatName = String(format?.format_name || "").trim();
+    if (!formatCode || !formatName) return [];
+    const dateCount = Array.isArray(format.screening_dates) ? format.screening_dates.length : 0;
+    return [`<option value="${index}">${escapeHtml(formatName)} · ${dateCount}일</option>`];
+  });
+  formatSelect.innerHTML = options.length
+    ? '<option value="">상영 포맷을 선택하세요</option>' + options.join("")
+    : '<option value="">현재 확인되는 상영 포맷이 없습니다</option>';
+  formatSelect.disabled = !options.length;
+  updateSelectionPreview();
+}
+
+function targetSelection() {
   const siteOption = byId("siteSelect").selectedOptions[0];
   const movieOption = byId("movieSelect").selectedOptions[0];
-  const valid = Boolean(siteOption?.value && movieOption?.value);
-  byId("createTarget").disabled = !valid;
-  byId("selectionPreview").innerHTML = valid
-    ? `<span aria-hidden="true">◎</span><p><strong>${escapeHtml(siteOption.dataset.siteName)}</strong><br>${escapeHtml(movieOption.dataset.movieName)} · ${escapeHtml(movieOption.dataset.formats || "IMAX")}</p>`
-    : '<span aria-hidden="true">◌</span><p>운영 중인 CGV 극장과 현재 확인되는 IMAX 영화만 표시합니다.</p>';
+  const format = selectedCatalogFormat();
+  if (!siteOption?.value || !movieOption?.value || !format) return null;
+  return { siteOption, movieOption, format };
+}
+
+function updateSelectionPreview() {
+  const selection = targetSelection();
+  byId("createTarget").disabled = !selection;
+  if (!selection) {
+    byId("selectionPreview").innerHTML = '<span aria-hidden="true">◌</span><p>현재 CGV 시간표에서 확인되는 영화와 상영 포맷을 표시합니다.</p>';
+    return;
+  }
+  const { siteOption, movieOption, format } = selection;
+  const screenNames = Array.isArray(format.screen_names) ? format.screen_names.filter(Boolean) : [];
+  const dates = Array.isArray(format.screening_dates) ? format.screening_dates : [];
+  const visibleScreenNames = screenNames.slice(0, 3);
+  const screenSummary = visibleScreenNames.length
+    ? `${visibleScreenNames.join(", ")}${screenNames.length > visibleScreenNames.length ? ` 외 ${screenNames.length - visibleScreenNames.length}개` : ""}`
+    : "상영관 정보 미확인";
+  const detail = [`${dates.length}일`, screenSummary].join(" · ");
+  byId("selectionPreview").innerHTML = `<span aria-hidden="true">◎</span><p><strong>${escapeHtml(siteOption.dataset.siteName)}</strong><br>${escapeHtml(movieOption.dataset.movieName)} · ${escapeHtml(format.format_name)}<br>${escapeHtml(detail)}</p>`;
 }
 
 async function createTarget(event) {
   event.preventDefault();
-  const siteOption = byId("siteSelect").selectedOptions[0];
-  const movieOption = byId("movieSelect").selectedOptions[0];
-  if (!siteOption?.value || !movieOption?.value) return;
+  const selection = targetSelection();
+  if (!selection) return;
+  const { siteOption, movieOption, format } = selection;
   const createButton = byId("createTarget");
   setButtonBusy(createButton, true);
   try {
@@ -1582,6 +1675,8 @@ async function createTarget(event) {
         site_name: siteOption.dataset.siteName,
         movie_no: movieOption.value,
         movie_name: movieOption.dataset.movieName,
+        format_code: String(format.format_code),
+        format_name: String(format.format_name),
       },
     });
     byId("targetDialog").close();
@@ -1590,7 +1685,7 @@ async function createTarget(event) {
     await refreshCurrent();
   } finally {
     createButton.setAttribute("aria-busy", "false");
-    createButton.disabled = !siteOption?.value || !movieOption?.value;
+    createButton.disabled = !targetSelection();
   }
 }
 
@@ -1840,7 +1935,8 @@ byId("targetEnabled").addEventListener("change", (event) => patchTarget({ enable
 byId("notifyNew").addEventListener("change", (event) => patchTarget({ notify_new: event.target.checked }).catch(reportError));
 byId("autoTrackNew").addEventListener("change", (event) => patchTarget({ auto_track_new: event.target.checked }).catch(reportError));
 byId("siteSelect").addEventListener("change", (event) => loadMovies(event.target.value).catch(reportError));
-byId("movieSelect").addEventListener("change", updateSelectionPreview);
+byId("movieSelect").addEventListener("change", (event) => loadFormats(event.target.value));
+byId("formatSelect").addEventListener("change", updateSelectionPreview);
 byId("targetForm").addEventListener("submit", (event) => createTarget(event).catch(reportError));
 byId("bulkThresholdForm").addEventListener("submit", (event) => applyBulkThreshold(event).catch(reportError));
 byId("pollSettingsForm").addEventListener("submit", (event) => savePollSettings(event).catch(reportError));

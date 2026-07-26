@@ -65,6 +65,7 @@ class ConsoleStore:
         "site_name",
         "movie_no",
         "movie_name",
+        "format_code",
         "format_keyword",
         "screen_grade_code",
         "enabled",
@@ -131,6 +132,7 @@ class ConsoleStore:
                     site_name TEXT NOT NULL,
                     movie_no TEXT NOT NULL,
                     movie_name TEXT NOT NULL,
+                    format_code TEXT NOT NULL DEFAULT '',
                     format_keyword TEXT NOT NULL,
                     screen_grade_code TEXT NOT NULL DEFAULT '',
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
@@ -156,7 +158,7 @@ class ConsoleStore:
                     updated_at TEXT NOT NULL,
                     UNIQUE(
                         company_code, site_no, movie_no,
-                        format_keyword, screen_grade_code
+                        format_code, format_keyword, screen_grade_code
                     )
                 );
 
@@ -253,6 +255,11 @@ class ConsoleStore:
                     "ADD COLUMN poll_jitter_seconds INTEGER NOT NULL DEFAULT 5 "
                     "CHECK(poll_jitter_seconds BETWEEN 0 AND 300)"
                 )
+            if "format_code" not in target_columns:
+                connection.execute(
+                    "ALTER TABLE watch_targets "
+                    "ADD COLUMN format_code TEXT NOT NULL DEFAULT ''"
+                )
 
             screening_columns = {
                 str(row["name"])
@@ -337,6 +344,7 @@ class ConsoleStore:
             "movie_name": str(
                 values.get("movie_name", values.get("movie_no", ""))
             ).strip(),
+            "format_code": str(values.get("format_code", "")).strip(),
             "format_keyword": str(values.get("format_keyword", "IMAX")).strip(),
             "screen_grade_code": str(values.get("screen_grade_code", "")).strip(),
             "enabled": bool(values.get("enabled", True)),
@@ -352,11 +360,23 @@ class ConsoleStore:
                 else None
             ),
         }
+        if result["format_code"] and not result["screen_grade_code"]:
+            # Older databases still have a UNIQUE constraint that ends with
+            # screen_grade_code. Mirroring the exact format code here lets two
+            # otherwise equally named formats coexist without rebuilding the
+            # parent table and its foreign-key children.
+            result["screen_grade_code"] = result["format_code"]
         required = ("company_code", "site_no", "site_name", "movie_no", "movie_name")
         if any(not result[field] for field in required):
             raise ValueError("target company, site, and movie fields are required")
-        if not result["format_keyword"] and not result["screen_grade_code"]:
-            raise ValueError("target format keyword or screen grade code is required")
+        if (
+            not result["format_code"]
+            and not result["format_keyword"]
+            and not result["screen_grade_code"]
+        ):
+            raise ValueError(
+                "target format code, keyword, or screen grade code is required"
+            )
         if result["poll_interval_seconds"] < 30:
             raise ValueError("poll_interval_seconds must be at least 30")
         return result
@@ -374,10 +394,10 @@ class ConsoleStore:
             f"""
             {action} INTO watch_targets(
                 company_code, site_no, site_name, movie_no, movie_name,
-                format_keyword, screen_grade_code, enabled, notify_new,
+                format_code, format_keyword, screen_grade_code, enabled, notify_new,
                 auto_track_new, state, poll_interval_seconds,
                 poll_jitter_seconds, next_poll_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 values["company_code"],
@@ -385,6 +405,7 @@ class ConsoleStore:
                 values["site_name"],
                 values["movie_no"],
                 values["movie_name"],
+                values["format_code"],
                 values["format_keyword"],
                 values["screen_grade_code"],
                 int(values["enabled"]),
@@ -407,6 +428,7 @@ class ConsoleStore:
             "site_name": "용산아이파크몰",
             "movie_no": "30001323",
             "movie_name": "오디세이",
+            "format_code": "",
             "format_keyword": "IMAX",
             "screen_grade_code": "0301",
             "enabled": True,
@@ -424,12 +446,14 @@ class ConsoleStore:
                     """
                     SELECT * FROM watch_targets
                     WHERE company_code = ? AND site_no = ? AND movie_no = ?
-                      AND format_keyword = ? AND screen_grade_code = ?
+                      AND format_code = ? AND format_keyword = ?
+                      AND screen_grade_code = ?
                     """,
                     (
                         values["company_code"],
                         values["site_no"],
                         values["movie_no"],
+                        values["format_code"],
                         values["format_keyword"],
                         values["screen_grade_code"],
                     ),
@@ -453,6 +477,23 @@ class ConsoleStore:
         normalized = self._target_values(supplied)
         try:
             with self._connection(immediate=True) as connection:
+                if normalized["format_code"]:
+                    duplicate = connection.execute(
+                        """
+                        SELECT 1 FROM watch_targets
+                        WHERE company_code = ? AND site_no = ? AND movie_no = ?
+                          AND format_code = ?
+                        LIMIT 1
+                        """,
+                        (
+                            normalized["company_code"],
+                            normalized["site_no"],
+                            normalized["movie_no"],
+                            normalized["format_code"],
+                        ),
+                    ).fetchone()
+                    if duplicate is not None:
+                        raise ValueError("an equivalent target already exists")
                 target_id = self._insert_target(connection, normalized)
                 row = connection.execute(
                     "SELECT * FROM watch_targets WHERE id = ?",

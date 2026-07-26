@@ -27,7 +27,7 @@ def test_renders_new_screening_message() -> None:
     messages = render_event_messages(event)
     assert len(messages) == 1
     message = messages[0]
-    assert "CGV IMAX 새 예매 회차" in message
+    assert "CGV 새 예매 회차" in message
     assert "2026-08-10 (월)" in message
     assert "잔여 12/624석" in message
     assert "해당 회차 예매하기" in message
@@ -89,7 +89,7 @@ def test_renders_booking_opened_message() -> None:
     messages = render_event_messages(event)
 
     assert len(messages) == 1
-    assert "CGV IMAX 예매 오픈 감지" in messages[0]
+    assert "CGV 예매 오픈 감지" in messages[0]
     assert "잔여 20/624석" in messages[0]
     assert "해당 회차 예매하기" in messages[0]
     assert item.booking_url in messages[0]

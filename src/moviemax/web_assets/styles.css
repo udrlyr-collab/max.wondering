@@ -1650,6 +1650,10 @@ details summary::-webkit-details-marker {
   gap: 11px;
 }
 
+.target-format-field {
+  grid-column: 1 / -1;
+}
+
 .form-grid-single {
   grid-template-columns: 1fr;
 }

@@ -50,6 +50,7 @@ class ConsoleWorker:
                 site_name=self.base_settings.site_name,
                 movie_no=self.base_settings.movie_no,
                 movie_name=self.base_settings.movie_name,
+                format_code=self.base_settings.format_code,
                 format_keyword=self.base_settings.format_keyword,
                 screen_grade_code=self.base_settings.screen_grade_code,
                 poll_interval_seconds=self.base_settings.poll_interval_seconds,
@@ -64,6 +65,7 @@ class ConsoleWorker:
             site_name=str(target["site_name"]),
             movie_no=str(target["movie_no"]),
             movie_name=str(target["movie_name"]),
+            format_code=str(target["format_code"]),
             format_keyword=str(target["format_keyword"]),
             screen_grade_code=str(target["screen_grade_code"]),
         )
@@ -77,7 +79,7 @@ class ConsoleWorker:
         for index, screening_date in enumerate(dates):
             if index and self.base_settings.request_gap_seconds:
                 time.sleep(self.base_settings.request_gap_seconds)
-            screenings.extend(client.get_imax_screenings(movie_no, screening_date))
+            screenings.extend(client.get_screenings(movie_no, screening_date))
         return screenings
 
     def process_target(self, target: dict[str, Any]) -> dict[str, Any] | None:

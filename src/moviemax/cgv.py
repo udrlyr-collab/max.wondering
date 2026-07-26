@@ -17,7 +17,9 @@ class CgvError(RuntimeError):
 
 
 _FORMAT_DISCRIMINATOR_FIELDS = (
+    "movkndCd",
     "movkndDsplEnm",
+    "movkndDsplNm",
     "scnsNm",
     "expoScnsNm",
     "tcscnsGradNm",
@@ -62,6 +64,18 @@ def _validate_format_discriminators(row: Mapping[str, Any], index: int) -> None:
         raise CgvError(
             f"CGV schedule row {index} is missing all format discriminator fields"
         )
+
+
+def _format_name(row: Mapping[str, Any], index: int) -> str:
+    for field in ("movkndDsplEnm", "movkndDsplNm", "tcscnsGradNm"):
+        value = str(row.get(field) or "").strip()
+        if value:
+            return value
+    raise CgvError(f"CGV schedule row {index} is missing its format name")
+
+
+def _format_code(row: Mapping[str, Any], index: int) -> str:
+    return _required_string(row.get("movkndCd"), f"schedule row {index} movkndCd")
 
 
 class CgvClient:
@@ -212,7 +226,7 @@ class CgvClient:
             dates.add(value)
         return sorted(dates)
 
-    def get_site_imax_movies(self, site_no: str) -> list[dict[str, Any]]:
+    def get_site_movies(self, site_no: str) -> list[dict[str, Any]]:
         validated_site_no = _validated_site_no(site_no)
         screening_dates = self.get_site_screening_dates(validated_site_no)
         movies: dict[str, dict[str, Any]] = {}
@@ -231,9 +245,6 @@ class CgvClient:
             )
             for row_index, row in enumerate(rows):
                 _validate_format_discriminators(row, row_index)
-                if not self._is_target_format(row):
-                    continue
-
                 movie_no = _required_string(
                     row.get("movNo"),
                     f"schedule row {row_index} movNo",
@@ -242,24 +253,37 @@ class CgvClient:
                     row.get("movNm"),
                     f"schedule row {row_index} movNm",
                 )
-                format_name = next(
-                    (
-                        text
-                        for field in ("movkndDsplEnm", "tcscnsGradNm")
-                        if (text := str(row.get(field) or "").strip())
-                    ),
-                    "IMAX",
-                )
+                format_code = _format_code(row, row_index)
+                format_name = _format_name(row, row_index)
+                grade_name = str(row.get("tcscnsGradNm") or "").strip()
+                screen_name = str(
+                    row.get("expoScnsNm") or row.get("scnsNm") or ""
+                ).strip()
                 entry = movies.setdefault(
                     movie_no,
                     {
                         "movie_no": movie_no,
                         "movie_name": movie_name,
-                        "formats": set(),
+                        "formats": {},
                         "screening_dates": set(),
                     },
                 )
-                entry["formats"].add(format_name)
+                format_entry = entry["formats"].setdefault(
+                    format_code,
+                    {
+                        "format_code": format_code,
+                        "format_names": set(),
+                        "screen_grade_names": set(),
+                        "screen_names": set(),
+                        "screening_dates": set(),
+                    },
+                )
+                format_entry["format_names"].add(format_name)
+                if grade_name:
+                    format_entry["screen_grade_names"].add(grade_name)
+                if screen_name:
+                    format_entry["screen_names"].add(screen_name)
+                format_entry["screening_dates"].add(screening_date)
                 entry["screening_dates"].add(screening_date)
 
         return sorted(
@@ -267,7 +291,26 @@ class CgvClient:
                 {
                     "movie_no": movie_no,
                     "movie_name": str(entry["movie_name"]),
-                    "formats": sorted(entry["formats"]),
+                    "formats": sorted(
+                        (
+                            {
+                                "format_code": str(format_code),
+                                "format_name": min(
+                                    format_entry["format_names"],
+                                    key=lambda value: (-len(value), value.casefold()),
+                                ),
+                                "screen_grade_names": sorted(
+                                    format_entry["screen_grade_names"]
+                                ),
+                                "screen_names": sorted(format_entry["screen_names"]),
+                                "screening_dates": sorted(
+                                    format_entry["screening_dates"]
+                                ),
+                            }
+                            for format_code, format_entry in entry["formats"].items()
+                        ),
+                        key=lambda item: (item["format_name"], item["format_code"]),
+                    ),
                     "screening_dates": sorted(entry["screening_dates"]),
                 }
                 for movie_no, entry in movies.items()
@@ -294,9 +337,7 @@ class CgvClient:
             dates.add(value)
         return sorted(dates)
 
-    def get_imax_screenings(
-        self, movie_no: str, screening_date: str
-    ) -> list[Screening]:
+    def get_screenings(self, movie_no: str, screening_date: str) -> list[Screening]:
         site_no = _validated_site_no(self.settings.site_no)
         rows = self._get_list(
             "/api/v1/booking/searchSchByMov",
@@ -311,9 +352,15 @@ class CgvClient:
         screenings: list[Screening] = []
         for index, row in enumerate(rows):
             _validate_format_discriminators(row, index)
+            if self.settings.format_code and not str(row.get("movkndCd") or "").strip():
+                raise CgvError(
+                    f"CGV schedule row {index} is missing its movkndCd format code"
+                )
             if not self._is_target_format(row):
                 continue
-            screenings.append(self._parse_screening(row, movie_no, screening_date))
+            screenings.append(
+                self._parse_screening(row, movie_no, screening_date, index=index)
+            )
         return sorted(
             screenings,
             key=lambda item: (
@@ -325,9 +372,15 @@ class CgvClient:
         )
 
     def _is_target_format(self, row: Mapping[str, Any]) -> bool:
+        format_code = self.settings.format_code.strip()
+        if format_code:
+            return str(row.get("movkndCd") or "").strip() == format_code
+
         keyword = self.settings.format_keyword.upper()
         text = " ".join(
-            str(row.get(field) or "") for field in _FORMAT_DISCRIMINATOR_FIELDS[:-1]
+            str(row.get(field) or "")
+            for field in _FORMAT_DISCRIMINATOR_FIELDS
+            if field != "scnsGradCd"
         ).upper()
         keyword_match = bool(keyword and keyword in text)
         grade_match = bool(
@@ -341,6 +394,8 @@ class CgvClient:
         row: Mapping[str, Any],
         movie_no: str,
         screening_date: str,
+        *,
+        index: int,
     ) -> Screening:
         screen_no = str(row.get("scnsNo") or "").strip()
         sequence = str(row.get("scnSseq") or "").strip()
@@ -389,11 +444,11 @@ class CgvClient:
             movie_name=str(row.get("movNm") or self.settings.movie_name),
             screening_date=actual_date,
             screen_no=screen_no,
-            screen_name=str(row.get("expoScnsNm") or row.get("scnsNm") or "IMAX관"),
+            screen_name=str(row.get("expoScnsNm") or row.get("scnsNm") or "상영관"),
             sequence=sequence,
             start_time=start_time,
             end_time=str(row.get("scnendTm") or "").strip(),
-            format_name=str(row.get("movkndDsplEnm") or "IMAX"),
+            format_name=_format_name(row, index),
             screen_grade_code=str(row.get("scnsGradCd") or ""),
             total_seats=_non_negative_int(row.get("stcnt"), "total seat count"),
             free_seats=_non_negative_int(free_seat_value, "free seat count"),

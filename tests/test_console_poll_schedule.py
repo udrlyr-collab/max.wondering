@@ -101,12 +101,45 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
     store = ConsoleStore(database, Fernet.generate_key().decode("ascii"))
 
     assert store.list_targets()[0]["poll_jitter_seconds"] == 5
+    assert store.list_targets()[0]["format_code"] == ""
+    existing = store.ensure_default_target(
+        site_no="0013",
+        site_name="Yongsan",
+        movie_no="movie-1",
+        movie_name="Odyssey",
+        format_keyword="IMAX",
+        screen_grade_code="0301",
+    )
+    assert existing["id"] == 1
+    assert len(store.list_targets()) == 1
     with sqlite3.connect(database) as connection:
         columns = {
             row[1]: row
             for row in connection.execute("PRAGMA table_info(watch_targets)")
         }
     assert columns["poll_jitter_seconds"][4] == "5"
+    assert columns["format_code"][4] == "''"
+
+    first_format = store.create_target(
+        site_no="0013",
+        site_name="Yongsan",
+        movie_no="movie-2",
+        movie_name="Second movie",
+        format_code="08",
+        format_keyword="same display name",
+        screen_grade_code="",
+    )
+    second_format = store.create_target(
+        site_no="0013",
+        site_name="Yongsan",
+        movie_no="movie-2",
+        movie_name="Second movie",
+        format_code="44",
+        format_keyword="same display name",
+        screen_grade_code="",
+    )
+    assert first_format["screen_grade_code"] == "08"
+    assert second_format["screen_grade_code"] == "44"
 
 
 def test_success_and_timing_update_use_interval_plus_bounded_jitter(
@@ -199,6 +232,8 @@ def test_poll_jitter_validation_and_target_api(tmp_path) -> None:
         "site_name": "Yongsan",
         "movie_no": "movie-1",
         "movie_name": "Odyssey",
+        "format_code": "48",
+        "format_name": "IMAX LASER 2D",
         "poll_interval_seconds": 75,
         "poll_jitter_seconds": 17,
     }

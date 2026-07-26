@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 ASSET_DIR = Path(__file__).parents[1] / "src" / "moviemax" / "web_assets"
@@ -44,7 +45,8 @@ def test_dashboard_loads_spacious_refined_visual_layer() -> None:
     stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
 
     assert "/assets/refined.css?v=20260727-1" in page
-    assert "/assets/app.js?v=20260727-1" in page
+    assert "/assets/styles.css?v=20260727-2" in page
+    assert "/assets/app.js?v=20260727-2" in page
     assert 'class="product-brand"' in page
     assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
     assert "--surface-strong: #171a17" in stylesheet
@@ -70,3 +72,50 @@ def test_open_dashboard_monitors_and_announces_new_seat_increases() -> None:
     assert "showInPageAlert(" in script
     assert 'bookingLink.textContent = "예매하기"' in script
     assert "monitorIncreaseAlerts().catch(reportError)" in script
+
+
+def test_target_dialog_requires_an_exact_movie_format_selection() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+    stylesheet = (ASSET_DIR / "styles.css").read_text(encoding="utf-8")
+
+    assert re.search(
+        r'<select id="formatSelect"[^>]*\brequired\b[^>]*\bdisabled\b', page
+    )
+    assert 'id="selectionPreview" role="status" aria-live="polite"' in page
+    assert "catalogMovies: []" in script
+    assert "function loadFormats(movieNo)" in script
+    assert "function selectedCatalogFormat()" in script
+    assert (
+        'byId("movieSelect").addEventListener("change", (event) => loadFormats(event.target.value))'
+        in script
+    )
+    assert (
+        'byId("formatSelect").addEventListener("change", updateSelectionPreview)'
+        in script
+    )
+    assert "format_code: String(format.format_code)" in script
+    assert "format_name: String(format.format_name)" in script
+    assert ".target-format-field {\n  grid-column: 1 / -1;\n}" in stylesheet
+
+
+def test_dashboard_identifies_targets_and_alerts_by_selected_format() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "function targetFormatLabel(target)" in script
+    assert "screening.format_name" in script
+    assert "포맷 / 상영관" in script
+    assert "상영 포맷 미확인" in script
+    assert "새 상영 회차 감지" in script
+    assert "극장과 영화, 추적할 상영 포맷을 차례로 선택하세요." in page
+    for legacy_copy in (
+        "IMAX 감지 콘솔",
+        "IMAX 감지 현황",
+        "IMAX watch console",
+        "새 IMAX 알림",
+        "IMAX 상영 회차",
+        "IMAX 상영 영화",
+        "현재 확인되는 IMAX 영화",
+    ):
+        assert legacy_copy not in page + script

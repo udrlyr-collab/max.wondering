@@ -5,25 +5,25 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
     <meta name="theme-color" content="#f2f3ef">
-    <title>max.wondering — IMAX 감지 콘솔</title>
-    <meta name="description" content="CGV IMAX 상영 회차와 잔여석을 추적하는 개인 관리 콘솔">
-    <link rel="stylesheet" href="/assets/styles.css?v=20260726-7">
+    <title>max.wondering — CGV 상영 감지 콘솔</title>
+    <meta name="description" content="CGV 상영 회차와 잔여석을 포맷별로 추적하는 개인 관리 콘솔">
+    <link rel="stylesheet" href="/assets/styles.css?v=20260727-2">
     <link rel="stylesheet" href="/assets/refined.css?v=20260727-1">
-    <script src="/assets/app.js?v=20260727-1" defer></script>
+    <script src="/assets/app.js?v=20260727-2" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#mainContent">본문으로 바로가기</a>
 
     <main id="mainContent">
       <section class="view-panel" id="overviewView" aria-labelledby="overviewTitle">
-        <h1 class="visually-hidden" id="overviewTitle">IMAX 감지 현황</h1>
+        <h1 class="visually-hidden" id="overviewTitle">CGV 상영 감지 현황</h1>
         <div class="workspace">
           <aside class="target-rail" aria-label="감시 대상">
-            <div class="product-brand" aria-label="max.wondering IMAX 감지 콘솔">
+            <div class="product-brand" aria-label="max.wondering CGV 상영 감지 콘솔">
               <span class="product-mark" aria-hidden="true">M</span>
               <span class="product-brand-copy">
                 <strong>max.wondering</strong>
-                <small>IMAX watch console</small>
+                <small>CGV watch console</small>
               </span>
             </div>
             <div class="section-heading target-heading">
@@ -40,14 +40,14 @@
           <section class="dashboard">
             <div class="empty-state" id="emptyState">
               <h2>감시 대상이 없습니다</h2>
-              <p>극장과 영화를 선택해 IMAX 상영 회차 감지를 시작하세요.</p>
+              <p>극장과 영화, 상영 포맷을 선택해 회차 감지를 시작하세요.</p>
               <button class="button button-primary" id="emptyAddTarget" type="button">감시 대상 추가</button>
             </div>
 
             <div class="dashboard-content is-hidden" id="dashboardContent">
               <header class="target-header">
                 <div class="target-title-group">
-                  <p class="target-kicker" id="targetKicker">CGV · IMAX</p>
+                  <p class="target-kicker" id="targetKicker">CGV · 상영 포맷</p>
                   <h2 id="targetTitle">대상을 불러오는 중</h2>
                   <p class="target-meta" id="targetMeta"></p>
                   <p class="poll-status" id="pollStatus">다음 조회 시각을 확인하는 중</p>
@@ -69,7 +69,7 @@
                 <div class="metric-item">
                   <span>예매 가능</span>
                   <strong id="metricOpen">—</strong>
-                  <small id="metricOpenSub">현재 IMAX 회차</small>
+                  <small id="metricOpenSub">현재 상영 회차</small>
                 </div>
                 <div class="metric-item">
                   <span>알림 회차</span>
@@ -114,7 +114,7 @@
                       <span class="switch" aria-hidden="true"></span>
                     </label>
                     <label class="switch-row">
-                      <span><strong>새 IMAX 알림</strong><small>신규 회차와 예매 오픈</small></span>
+                      <span><strong>새 회차 알림</strong><small>신규 회차와 예매 오픈</small></span>
                       <input id="notifyNew" type="checkbox">
                       <span class="switch" aria-hidden="true"></span>
                     </label>
@@ -169,7 +169,7 @@
               <section class="schedule-panel" aria-labelledby="scheduleTitle">
                 <div class="section-heading schedule-heading">
                   <div>
-                    <h2 id="scheduleTitle">IMAX 상영 회차</h2>
+                    <h2 id="scheduleTitle">상영 회차</h2>
                     <div class="schedule-status" id="scheduleStatus" role="status" aria-live="polite" aria-atomic="true"></div>
                   </div>
                   <div class="filter-group" role="group" aria-label="상영 회차 필터">
@@ -236,7 +236,7 @@
         <div class="modal-heading">
           <div>
             <h2 id="targetDialogTitle">감시 대상 추가</h2>
-            <p id="targetDialogDescription">극장과 현재 상영 중인 IMAX 영화를 선택하세요.</p>
+            <p id="targetDialogDescription">극장과 영화, 추적할 상영 포맷을 차례로 선택하세요.</p>
           </div>
           <button class="icon-button dialog-close" type="button" aria-label="닫기">×</button>
         </div>
@@ -248,14 +248,20 @@
             </select>
           </label>
           <label>
-            <span>IMAX 상영 영화</span>
+            <span>상영 영화</span>
             <select id="movieSelect" required disabled>
               <option value="">먼저 극장을 선택하세요</option>
             </select>
           </label>
+          <label class="target-format-field">
+            <span>상영 포맷</span>
+            <select id="formatSelect" required disabled>
+              <option value="">먼저 영화를 선택하세요</option>
+            </select>
+          </label>
         </div>
-        <div class="selection-preview" id="selectionPreview">
-          <p>운영 중인 CGV 극장과 현재 확인되는 IMAX 영화만 표시합니다.</p>
+        <div class="selection-preview" id="selectionPreview" role="status" aria-live="polite" aria-atomic="true">
+          <p>현재 CGV 시간표에서 확인되는 영화와 상영 포맷을 표시합니다.</p>
         </div>
         <div class="modal-actions">
           <button class="button button-secondary dialog-close" type="button">취소</button>

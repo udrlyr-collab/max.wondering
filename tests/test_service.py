@@ -25,7 +25,7 @@ class FakeCgv:
     def get_screening_dates(self, _movie_no: str) -> list[str]:
         return ["20260810"]
 
-    def get_imax_screenings(self, _movie_no: str, _date: str) -> list:
+    def get_screenings(self, _movie_no: str, _date: str) -> list:
         snapshot = self.snapshots[min(self.index, len(self.snapshots) - 1)]
         self.index += 1
         return snapshot

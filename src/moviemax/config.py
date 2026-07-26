@@ -82,6 +82,7 @@ class Settings:
     site_name: str = "용산아이파크몰"
     movie_no: str = "30001323"
     movie_name: str = "오디세이"
+    format_code: str = ""
     format_keyword: str = "IMAX"
     screen_grade_code: str = "0301"
     poll_interval_seconds: int = 60
@@ -116,6 +117,7 @@ class Settings:
             site_name=os.getenv("CGV_SITE_NAME", "용산아이파크몰").strip(),
             movie_no=os.getenv("CGV_MOVIE_NO", "30001323").strip(),
             movie_name=os.getenv("CGV_MOVIE_NAME", "오디세이").strip(),
+            format_code=os.getenv("CGV_FORMAT_CODE", "").strip(),
             format_keyword=os.getenv("CGV_FORMAT_KEYWORD", "IMAX").strip(),
             screen_grade_code=os.getenv("CGV_SCREEN_GRADE_CODE", "0301").strip(),
             poll_interval_seconds=_int("POLL_INTERVAL_SECONDS", 60),
@@ -157,8 +159,14 @@ class Settings:
             raise ConfigError("CGV site number and name are required")
         if not self.movie_no and not self.movie_name:
             raise ConfigError("CGV_MOVIE_NO or CGV_MOVIE_NAME is required")
-        if not self.format_keyword and not self.screen_grade_code:
-            raise ConfigError("An IMAX keyword or screen grade code is required")
+        if (
+            not self.format_code
+            and not self.format_keyword
+            and not self.screen_grade_code
+        ):
+            raise ConfigError(
+                "A format code, keyword, or screen grade code is required"
+            )
         if self.poll_interval_seconds < 30:
             raise ConfigError("POLL_INTERVAL_SECONDS must be at least 30")
         if not 0 <= self.poll_jitter_seconds <= MAX_POLL_JITTER_SECONDS:

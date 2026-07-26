@@ -54,7 +54,7 @@ class MonitorService:
         for index, screening_date in enumerate(dates):
             if index and self.settings.request_gap_seconds:
                 time.sleep(self.settings.request_gap_seconds)
-            screenings.extend(self.cgv.get_imax_screenings(movie_no, screening_date))
+            screenings.extend(self.cgv.get_screenings(movie_no, screening_date))
         return dates, screenings
 
     def poll_once(self) -> PollResult:
@@ -186,7 +186,7 @@ class MonitorService:
                 delay = max(0.0, self.settings.poll_interval_seconds - elapsed)
                 delay += random.uniform(0, self.settings.poll_jitter_seconds)
                 logger.info(
-                    "Poll complete: dates=%d imax=%d new=%d opened=%d "
+                    "Poll complete: dates=%d screenings=%d new=%d opened=%d "
                     "seat_increases=%d sent=%d failed=%d dead=%d",
                     result.dates,
                     result.screenings,

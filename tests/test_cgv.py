@@ -62,12 +62,12 @@ class RoutingSession:
         raise AssertionError(f"Unexpected CGV URL: {url}")
 
 
-def test_parses_dates_and_filters_only_imax() -> None:
+def test_parses_dates_and_filters_legacy_imax_target() -> None:
     session = FakeSession()
     client = CgvClient(Settings(), session=session)
 
     dates = client.get_screening_dates("30001323")
-    screenings = client.get_imax_screenings("30001323", dates[0])
+    screenings = client.get_screenings("30001323", dates[0])
 
     assert dates == ["20260805", "20260806"]
     assert len(screenings) == 1
@@ -132,7 +132,7 @@ def test_rejects_schedule_without_format_discriminator() -> None:
     client = CgvClient(Settings(), session=StaticSession(payload))
 
     with pytest.raises(CgvError, match="format discriminator"):
-        client.get_imax_screenings("30001323", "20260805")
+        client.get_screenings("30001323", "20260805")
 
 
 def test_rejects_target_schedule_without_booking_control_flag() -> None:
@@ -141,7 +141,7 @@ def test_rejects_target_schedule_without_booking_control_flag() -> None:
     client = CgvClient(Settings(), session=StaticSession(payload))
 
     with pytest.raises(CgvError, match="booking control flag"):
-        client.get_imax_screenings("30001323", "20260805")
+        client.get_screenings("30001323", "20260805")
 
 
 def test_get_regions_and_sites_returns_json_catalog_with_operation_status() -> None:
@@ -191,7 +191,7 @@ def test_get_regions_and_sites_returns_json_catalog_with_operation_status() -> N
     json.dumps(catalog)
 
 
-def test_get_site_imax_movies_walks_all_dates_and_deduplicates_by_movie_no(
+def test_get_site_movies_walks_all_dates_and_groups_all_formats_by_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dates_payload = {
@@ -208,13 +208,19 @@ def test_get_site_imax_movies_walks_all_dates_and_deduplicates_by_movie_no(
                 {
                     "movNo": "30001323",
                     "movNm": "Odyssey",
+                    "movkndCd": "48",
                     "movkndDsplEnm": imax_format,
+                    "tcscnsGradNm": "아이맥스",
+                    "scnsNm": "IMAX관",
                     "scnsGradCd": "0301",
                 },
                 {
                     "movNo": "30000001",
                     "movNm": "Normal Movie",
+                    "movkndCd": "02",
                     "movkndDsplEnm": "2D",
+                    "tcscnsGradNm": "일반",
+                    "scnsNm": "1관",
                     "scnsGradCd": "0101",
                 },
             ],
@@ -230,15 +236,37 @@ def test_get_site_imax_movies_walks_all_dates_and_deduplicates_by_movie_no(
     monkeypatch.setattr("moviemax.cgv.time.sleep", sleep_calls.append)
     client = CgvClient(Settings(request_gap_seconds=0.25), session=session)
 
-    catalog = client.get_site_imax_movies("0013")
+    catalog = client.get_site_movies("0013")
 
     assert catalog == [
         {
+            "movie_no": "30000001",
+            "movie_name": "Normal Movie",
+            "formats": [
+                {
+                    "format_code": "02",
+                    "format_name": "2D",
+                    "screen_grade_names": ["일반"],
+                    "screen_names": ["1관"],
+                    "screening_dates": ["20260805", "20260806"],
+                }
+            ],
+            "screening_dates": ["20260805", "20260806"],
+        },
+        {
             "movie_no": "30001323",
             "movie_name": "Odyssey",
-            "formats": ["IMAX 2D", "IMAX LASER 2D"],
+            "formats": [
+                {
+                    "format_code": "48",
+                    "format_name": "IMAX LASER 2D",
+                    "screen_grade_names": ["아이맥스"],
+                    "screen_names": ["IMAX관"],
+                    "screening_dates": ["20260805", "20260806"],
+                }
+            ],
             "screening_dates": ["20260805", "20260806"],
-        }
+        },
     ]
     json.dumps(catalog)
     schedule_calls = [call for url, call in session.calls if "searchMovScnInfo" in url]
@@ -251,7 +279,7 @@ def test_get_site_imax_movies_walks_all_dates_and_deduplicates_by_movie_no(
     assert sleep_calls == [0.25]
 
 
-def test_get_site_imax_movies_allows_only_normal_schedule_rows() -> None:
+def test_get_site_movies_includes_normal_schedule_rows() -> None:
     session = RoutingSession(
         {
             "searchSiteScnscYmdListBySite": {
@@ -264,7 +292,10 @@ def test_get_site_imax_movies_allows_only_normal_schedule_rows() -> None:
                     {
                         "movNo": "30000001",
                         "movNm": "Normal Movie",
+                        "movkndCd": "02",
                         "movkndDsplEnm": "2D",
+                        "tcscnsGradNm": "일반",
+                        "scnsNm": "1관",
                         "scnsGradCd": "0101",
                     }
                 ],
@@ -273,7 +304,22 @@ def test_get_site_imax_movies_allows_only_normal_schedule_rows() -> None:
     )
     client = CgvClient(Settings(request_gap_seconds=0), session=session)
 
-    assert client.get_site_imax_movies("0013") == []
+    assert client.get_site_movies("0013") == [
+        {
+            "movie_no": "30000001",
+            "movie_name": "Normal Movie",
+            "formats": [
+                {
+                    "format_code": "02",
+                    "format_name": "2D",
+                    "screen_grade_names": ["일반"],
+                    "screen_names": ["1관"],
+                    "screening_dates": ["20260805"],
+                }
+            ],
+            "screening_dates": ["20260805"],
+        }
+    ]
 
 
 @pytest.mark.parametrize("site_no", [13, "", "   "])
@@ -323,4 +369,30 @@ def test_site_movie_catalog_rejects_missing_format_discriminators() -> None:
     client = CgvClient(Settings(request_gap_seconds=0), session=session)
 
     with pytest.raises(CgvError, match="format discriminator"):
-        client.get_site_imax_movies("0013")
+        client.get_site_movies("0013")
+
+
+def test_format_code_exactly_separates_normal_2d_from_special_formats() -> None:
+    payload = json.loads((FIXTURES / "cgv_schedule.json").read_text(encoding="utf-8"))
+    client = CgvClient(
+        Settings(format_code="02", format_keyword="2D", screen_grade_code=""),
+        session=StaticSession(payload),
+    )
+
+    screenings = client.get_screenings("30001323", "20260805")
+
+    assert len(screenings) == 1
+    assert screenings[0].format_name == "2D"
+    assert screenings[0].screen_name == "1관"
+
+
+def test_exact_format_target_rejects_rows_without_format_code() -> None:
+    payload = json.loads((FIXTURES / "cgv_schedule.json").read_text(encoding="utf-8"))
+    del payload["data"][1]["movkndCd"]
+    client = CgvClient(
+        Settings(format_code="02", format_keyword="2D", screen_grade_code=""),
+        session=StaticSession(payload),
+    )
+
+    with pytest.raises(CgvError, match="movkndCd format code"):
+        client.get_screenings("30001323", "20260805")
