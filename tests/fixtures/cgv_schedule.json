@@ -1,0 +1,43 @@
+{
+  "statusCode": 0,
+  "statusMessage": "조회 되었습니다.",
+  "data": [
+    {
+      "coCd": "A420",
+      "siteNo": "0013",
+      "scnYmd": "20260805",
+      "scnsNo": "018",
+      "scnsNm": "IMAX관",
+      "expoScnsNm": "IMAX관",
+      "scnSseq": "2",
+      "scnsrtTm": "1000",
+      "scnendTm": "1302",
+      "movNo": "30001323",
+      "movNm": "오디세이",
+      "movkndCd": "48",
+      "movkndDsplEnm": "IMAX LASER 2D",
+      "scnsGradCd": "0301",
+      "stcnt": "624",
+      "frSeatCnt": "2",
+      "cntlYn": "N"
+    },
+    {
+      "coCd": "A420",
+      "siteNo": "0013",
+      "scnYmd": "20260805",
+      "scnsNo": "001",
+      "scnsNm": "1관",
+      "expoScnsNm": "1관",
+      "scnSseq": "3",
+      "scnsrtTm": "1100",
+      "scnendTm": "1402",
+      "movNo": "30001323",
+      "movNm": "오디세이",
+      "movkndDsplEnm": "2D",
+      "scnsGradCd": "0101",
+      "stcnt": "204",
+      "frSeatCnt": "88",
+      "cntlYn": "N"
+    }
+  ]
+}

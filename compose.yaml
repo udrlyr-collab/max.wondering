@@ -1,0 +1,72 @@
+x-moviemax-service: &moviemax-service
+  build:
+    context: .
+  image: moviemax-cgv-monitor:local
+  init: true
+  env_file:
+    - .env
+  environment:
+    APP_ENCRYPTION_KEY: "${APP_ENCRYPTION_KEY:-}"
+    CONSOLE_DB_PATH: /data/console.sqlite3
+    CONSOLE_WEB_HOST: 0.0.0.0
+    CONSOLE_WEB_PORT: "8000"
+    CONSOLE_PUBLIC_ORIGIN: "${CONSOLE_PUBLIC_ORIGIN:-https://max.wondering.kr}"
+    CONSOLE_ALLOWED_HOSTS: "${CONSOLE_ALLOWED_HOSTS:-max.wondering.kr,127.0.0.1,localhost}"
+    SEED_DEFAULT_TARGET: "${SEED_DEFAULT_TARGET:-true}"
+    TZ: Asia/Seoul
+  volumes:
+    - moviemax-data:/data
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "3"
+
+services:
+  migrate:
+    <<: *moviemax-service
+    command: ["console-migrate"]
+    restart: "no"
+
+  web:
+    <<: *moviemax-service
+    command: ["console-web"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8787:8000"
+    healthcheck:
+      test: ["CMD", "python", "-m", "moviemax", "console-web-health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+  worker:
+    <<: *moviemax-service
+    command: ["console-worker"]
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "moviemax", "console-worker-health"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+volumes:
+  moviemax-data:
+    name: moviemax-data
