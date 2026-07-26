@@ -929,6 +929,12 @@ a:focus-visible {
   }
 }
 
+@media (max-width: 820px) {
+  .activity-page-statuses {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 560px) {
   .target-rail {
     border-radius: 0;

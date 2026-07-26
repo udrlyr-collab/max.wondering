@@ -131,7 +131,8 @@ def test_activity_page_has_compact_live_header_and_realtime_updates() -> None:
     assert 'id="activityWorkerLabel" role="status" aria-live="polite"' in page
     assert 'id="activityNewRecords"' in page and " hidden" in page
     assert 'id="showLatestActivity"' in page
-    assert 'id="activityFullList" aria-live="polite"' in page
+    assert 'id="activityFullList"' in page
+    assert 'id="activityLiveUpdateStatus" role="status" aria-live="polite"' in page
     assert "font-size: clamp(21px, 2.2vw, 28px)" in stylesheet
     assert ".activity-page-statuses" in stylesheet
     assert ".activity-new-records[hidden]" in stylesheet
@@ -141,8 +142,12 @@ def test_activity_page_has_compact_live_header_and_realtime_updates() -> None:
     assert "async function syncLiveView" in script
     assert "if (page !== 1)" in script
     assert "showPendingActivityRecords(items)" in script
-    assert "if (contentChanged) renderActivityPage()" in script
+    assert "if (contentChanged) {" in script
+    assert "announceActivityLiveUpdate(" in script
     assert "if (targetId) await loadRecentAlerts(targetId)" in script
+    assert "await Promise.all([loadActivityStatus(), syncFullActivityLive()])" in script
+    assert "if (workerLabel && workerLabel.textContent !== countdown.label)" in script
+    assert "restoreActivityListFocus(focusMarker)" in script
     assert "syncLiveView().catch(reportBackgroundError);" in script
     assert "monitorIncreaseAlerts().catch(reportBackgroundError);" in script
     assert "}, liveSyncIntervalMs);" in script

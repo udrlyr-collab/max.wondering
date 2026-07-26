@@ -244,7 +244,8 @@
             <button class="button button-secondary" id="resetActivityFilters" type="button">초기화</button>
           </div>
         </form>
-        <div class="activity-full-list" id="activityFullList" aria-live="polite" aria-relevant="additions text"></div>
+        <div class="activity-full-list" id="activityFullList"></div>
+        <p class="visually-hidden" id="activityLiveUpdateStatus" role="status" aria-live="polite" aria-atomic="true"></p>
         <nav class="pagination" aria-label="감지 기록 페이지">
           <button class="button button-secondary" id="prevActivityPage" type="button">이전</button>
           <span id="activityPageStatus" aria-live="polite">1 / 1</span>

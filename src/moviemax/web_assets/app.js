@@ -7,6 +7,7 @@ const state = {
   activity: [],
   recentAlerts: [],
   telegram: {},
+  workerOk: null,
   catalog: null,
   catalogMovies: [],
   filter: "all",
@@ -42,6 +43,7 @@ const state = {
     activityFilterKey: "",
     pendingHeadId: null,
     pendingNewCount: 0,
+    statusRequestId: 0,
   },
 };
 
@@ -501,6 +503,9 @@ function updateLiveTimes() {
 }
 
 function renderWorker(status) {
+  state.workerOk = status?.worker_ok === true
+    ? true
+    : status?.worker_ok === false ? false : null;
   const chip = byId("workerChip");
   chip.classList.toggle("is-ok", status?.worker_ok === true);
   chip.classList.toggle("is-error", status?.worker_ok === false);
@@ -1182,21 +1187,39 @@ function activityCountdownTarget() {
 
 function activityPollCountdownState(now = Date.now() + state.serverClockOffsetMs) {
   const target = activityCountdownTarget();
-  if (!target) return { value: "—", label: "활성 감시 대상 없음", ok: false, error: false };
+  if (!target) {
+    const workerError = state.workerOk === false;
+    return {
+      value: "—",
+      label: workerError ? "감지 확인 필요" : "활성 감시 대상 없음",
+      ok: false,
+      error: workerError,
+    };
+  }
   const context = `${target.movie_name} · ${targetFormatLabel(target)}`;
   const phase = refreshPhase(target);
-  const error = Boolean(target.last_error);
-  const label = `${context} · ${error ? "조회 오류" : phase === "disabled" ? "감지 중지" : "감지 정상"}`;
+  const targetError = Boolean(target.last_error);
+  const workerError = state.workerOk === false;
+  const error = targetError || workerError;
+  const healthLabel = workerError
+    ? "감지 확인 필요"
+    : targetError
+      ? "조회 오류"
+      : state.workerOk === null
+        ? "상태 확인 중"
+        : phase === "disabled" ? "감지 중지" : "감지 정상";
+  const label = `${context} · ${healthLabel}`;
+  const ok = state.workerOk === true && !targetError && phase !== "disabled";
   if (phase === "disabled") return { value: "중지", label, ok: false, error };
-  if (phase === "running") return { value: "조회 중", label, ok: !error, error };
-  if (phase === "queued") return { value: "대기 중", label, ok: !error, error };
+  if (phase === "running") return { value: "조회 중", label, ok, error };
+  if (phase === "queued") return { value: "대기 중", label, ok, error };
   const nextPollAt = timestampMs(target.next_poll_at);
-  if (nextPollAt === null) return { value: "계산 중", label, ok: !error, error };
+  if (nextPollAt === null) return { value: "계산 중", label, ok, error };
   const remainingSeconds = Math.max(0, Math.ceil((nextPollAt - now) / 1000));
   return {
     value: remainingSeconds > 0 ? `${remainingSeconds}초` : "대기 중",
     label,
-    ok: !error,
+    ok,
     error,
   };
 }
@@ -1208,7 +1231,9 @@ function updateActivityPollCountdown(now = Date.now() + state.serverClockOffsetM
   if (dedicated) {
     dedicated.textContent = countdown.value;
     const workerLabel = byId("activityWorkerLabel");
-    if (workerLabel) workerLabel.textContent = countdown.label;
+    if (workerLabel && workerLabel.textContent !== countdown.label) {
+      workerLabel.textContent = countdown.label;
+    }
     const status = byId("activityPollStatus");
     status?.classList.toggle("is-ok", countdown.ok);
     status?.classList.toggle("is-error", countdown.error);
@@ -1221,6 +1246,38 @@ function updateActivityPollCountdown(now = Date.now() + state.serverClockOffsetM
   result.textContent = `${base} · ${countdown.label} · 다음 조회 ${countdown.value}`;
 }
 
+const activityFocusableSelector = "summary, a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])";
+
+function activityListFocusMarker() {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement)) return null;
+  const article = active.closest("[data-activity-id]");
+  if (!article) return null;
+  const focusable = [...article.querySelectorAll(activityFocusableSelector)];
+  const index = focusable.indexOf(active);
+  if (index < 0) return null;
+  return { activityId: article.dataset.activityId, index };
+}
+
+function restoreActivityListFocus(marker) {
+  if (!marker) return;
+  const article = [...document.querySelectorAll("[data-activity-id]")]
+    .find((item) => item.dataset.activityId === marker.activityId);
+  const target = article?.querySelectorAll(activityFocusableSelector)[marker.index];
+  if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+}
+
+function announceActivityLiveUpdate(message) {
+  const status = byId("activityLiveUpdateStatus");
+  if (!status) return;
+  if (status.textContent !== message) {
+    status.textContent = message;
+    return;
+  }
+  status.textContent = "";
+  requestAnimationFrame(() => { status.textContent = message; });
+}
+
 function renderActivityPage() {
   const log = state.activityLog;
   const list = byId("activityFullList");
@@ -1229,7 +1286,7 @@ function renderActivityPage() {
     list.innerHTML = '<p class="activity-empty">조건에 맞는 감지 기록이 없습니다.</p>';
   } else if (log.items.length) {
     list.innerHTML = log.items.map((item) => `
-      <article class="activity-full-item ${activityToneClass(item)} ${activityIsDead(item) ? "is-dead" : ""}">
+      <article class="activity-full-item ${activityToneClass(item)} ${activityIsDead(item) ? "is-dead" : ""}" data-activity-id="${escapeHtml(item.id)}">
         <header>${activityOverviewHtml(item)}</header>
         ${activityDetailsHtml(item)}
       </article>`).join("");
@@ -1312,13 +1369,26 @@ async function syncFullActivityLive() {
   const contentChanged = JSON.stringify(log.items) !== JSON.stringify(items)
     || log.nextCursor !== nextCursor
     || log.hasMore !== hasMore;
+  const previousHeadId = activityHeadId(log.items);
+  const nextHeadId = activityHeadId(items);
+  const focusMarker = contentChanged ? activityListFocusMarker() : null;
   log.items = items;
   log.nextCursor = nextCursor;
   log.hasMore = hasMore;
   state.liveSync.activityFilterKey = filterKey;
   state.liveSync.activityHeadId = activityHeadId(items);
   clearPendingActivityRecords();
-  if (contentChanged) renderActivityPage();
+  if (contentChanged) {
+    if (nextHeadId !== null && nextHeadId !== previousHeadId) {
+      const previousIndex = previousHeadId === null
+        ? -1
+        : items.findIndex((item) => String(item.id) === previousHeadId);
+      const count = previousIndex > 0 ? previousIndex : 1;
+      announceActivityLiveUpdate(`새 감지 기록 ${count}건을 반영했습니다.`);
+    }
+    renderActivityPage();
+    restoreActivityListFocus(focusMarker);
+  }
 }
 
 async function showLatestActivity() {
@@ -1330,6 +1400,22 @@ function reportBackgroundError(error) {
   console.warn("MovieMax background sync failed", error);
 }
 
+async function loadActivityStatus() {
+  const requestId = state.liveSync.statusRequestId + 1;
+  state.liveSync.statusRequestId = requestId;
+  const requestStartedAt = Date.now();
+  const data = await api("/api/v1/bootstrap");
+  if (requestId !== state.liveSync.statusRequestId) return;
+  const serverTime = timestampMs(data.server_time);
+  if (serverTime !== null) {
+    state.serverClockOffsetMs = serverTime - ((requestStartedAt + Date.now()) / 2);
+  }
+  state.targets = Array.isArray(data.targets) ? data.targets : [];
+  renderWorker(data.status || {});
+  renderActivityTargetFilter();
+  updateActivityPollCountdown();
+}
+
 async function syncLiveView({ force = false } = {}) {
   if ((!force && document.hidden) || state.liveSync.inFlight) return;
   const workspace = document.querySelector(".workspace");
@@ -1337,7 +1423,7 @@ async function syncLiveView({ force = false } = {}) {
   state.liveSync.inFlight = true;
   try {
     if (activityPath) {
-      await syncFullActivityLive();
+      await Promise.all([loadActivityStatus(), syncFullActivityLive()]);
       return;
     }
     const targetId = state.selectedTargetId;
@@ -2179,8 +2265,10 @@ setInterval(() => {
 }, liveSyncIntervalMs);
 setInterval(() => {
   const workspace = document.querySelector(".workspace");
-  if (!document.hidden
+  if (!activityPath
+      && !document.hidden
       && !document.querySelector("dialog[open]")
+      && !state.liveSync.inFlight
       && workspace?.getAttribute("aria-busy") !== "true") {
     loadBootstrap().catch(reportBackgroundError);
   }
