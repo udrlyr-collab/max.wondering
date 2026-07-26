@@ -7,9 +7,9 @@
     <meta name="theme-color" content="#f2f3ef">
     <title>max.wondering — CGV 상영 감지 콘솔</title>
     <meta name="description" content="CGV 상영 회차와 잔여석을 포맷별로 추적하는 개인 관리 콘솔">
-    <link rel="stylesheet" href="/assets/styles.css?v=20260727-2">
-    <link rel="stylesheet" href="/assets/refined.css?v=20260727-1">
-    <script src="/assets/app.js?v=20260727-2" defer></script>
+    <link rel="stylesheet" href="/assets/styles.css?v=20260727-3">
+    <link rel="stylesheet" href="/assets/refined.css?v=20260727-3">
+    <script src="/assets/app.js?v=20260727-3" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#mainContent">본문으로 바로가기</a>
@@ -187,11 +187,33 @@
 
       <section class="view-panel activity-view is-hidden" id="activityView" aria-labelledby="activityViewTitle">
         <header class="activity-page-heading">
-          <a class="text-link back-button" href="/">← 현황으로</a>
-          <div>
+          <a class="activity-page-brand" href="/" aria-label="max.wondering 감지 현황으로">
+            <span class="product-mark" aria-hidden="true">M</span>
+            <span class="activity-page-brand-copy">
+              <strong>max.wondering</strong>
+              <small>CGV watch console</small>
+            </span>
+          </a>
+          <div class="activity-page-title">
+            <span class="activity-page-kicker" aria-hidden="true">Activity log</span>
             <h1 id="activityViewTitle" tabindex="-1">전체 감지 기록</h1>
             <p id="activityResultText">기록을 불러오는 중입니다.</p>
           </div>
+          <div class="activity-page-statuses">
+            <div class="activity-poll-status" id="activityPollStatus" aria-label="다음 조회까지 남은 시간">
+              <span class="status-dot" aria-hidden="true"></span>
+              <span class="activity-poll-copy">
+                <small>다음 조회</small>
+                <strong id="activityPollCountdown" role="timer" aria-live="off">계산 중</strong>
+                <span id="activityWorkerLabel" role="status" aria-live="polite" aria-atomic="true">감지 상태 확인 중</span>
+              </span>
+            </div>
+            <div class="activity-new-records" id="activityNewRecords" role="group" aria-labelledby="activityNewRecordsText" hidden>
+              <span id="activityNewRecordsText" role="status" aria-live="polite" aria-atomic="true">새 감지 기록이 있습니다.</span>
+              <button id="showLatestActivity" type="button">최신 기록</button>
+            </div>
+          </div>
+          <a class="button button-secondary back-button" href="/">현황으로</a>
         </header>
         <form class="activity-filters" id="activityFilterForm">
           <label>
@@ -222,7 +244,7 @@
             <button class="button button-secondary" id="resetActivityFilters" type="button">초기화</button>
           </div>
         </form>
-        <div class="activity-full-list" id="activityFullList"></div>
+        <div class="activity-full-list" id="activityFullList" aria-live="polite" aria-relevant="additions text"></div>
         <nav class="pagination" aria-label="감지 기록 페이지">
           <button class="button button-secondary" id="prevActivityPage" type="button">이전</button>
           <span id="activityPageStatus" aria-live="polite">1 / 1</span>

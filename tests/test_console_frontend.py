@@ -44,9 +44,9 @@ def test_dashboard_loads_spacious_refined_visual_layer() -> None:
     page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
     stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
 
-    assert "/assets/refined.css?v=20260727-1" in page
-    assert "/assets/styles.css?v=20260727-2" in page
-    assert "/assets/app.js?v=20260727-2" in page
+    assert "/assets/refined.css?v=20260727-3" in page
+    assert "/assets/styles.css?v=20260727-3" in page
+    assert "/assets/app.js?v=20260727-3" in page
     assert 'class="product-brand"' in page
     assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
     assert "--surface-strong: #171a17" in stylesheet
@@ -71,7 +71,7 @@ def test_open_dashboard_monitors_and_announces_new_seat_increases() -> None:
     assert "showBrowserNotification(" in script
     assert "showInPageAlert(" in script
     assert 'bookingLink.textContent = "예매하기"' in script
-    assert "monitorIncreaseAlerts().catch(reportError)" in script
+    assert "monitorIncreaseAlerts().catch(reportBackgroundError)" in script
 
 
 def test_target_dialog_requires_an_exact_movie_format_selection() -> None:
@@ -119,3 +119,31 @@ def test_dashboard_identifies_targets_and_alerts_by_selected_format() -> None:
         "현재 확인되는 IMAX 영화",
     ):
         assert legacy_copy not in page + script
+
+
+def test_activity_page_has_compact_live_header_and_realtime_updates() -> None:
+    page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
+    script = (ASSET_DIR / "app.js").read_text(encoding="utf-8")
+    stylesheet = (ASSET_DIR / "styles.css").read_text(encoding="utf-8")
+
+    assert 'class="activity-page-brand"' in page
+    assert 'id="activityPollCountdown" role="timer"' in page
+    assert 'id="activityWorkerLabel" role="status" aria-live="polite"' in page
+    assert 'id="activityNewRecords"' in page and " hidden" in page
+    assert 'id="showLatestActivity"' in page
+    assert 'id="activityFullList" aria-live="polite"' in page
+    assert "font-size: clamp(21px, 2.2vw, 28px)" in stylesheet
+    assert ".activity-page-statuses" in stylesheet
+    assert ".activity-new-records[hidden]" in stylesheet
+
+    assert "const liveSyncIntervalMs = 3000" in script
+    assert "async function syncFullActivityLive()" in script
+    assert "async function syncLiveView" in script
+    assert "if (page !== 1)" in script
+    assert "showPendingActivityRecords(items)" in script
+    assert "if (contentChanged) renderActivityPage()" in script
+    assert "if (targetId) await loadRecentAlerts(targetId)" in script
+    assert "syncLiveView().catch(reportBackgroundError);" in script
+    assert "monitorIncreaseAlerts().catch(reportBackgroundError);" in script
+    assert "}, liveSyncIntervalMs);" in script
+    assert 'document.addEventListener("visibilitychange"' in script

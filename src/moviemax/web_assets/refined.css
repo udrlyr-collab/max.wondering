@@ -796,9 +796,66 @@ a:focus-visible {
   padding: 24px;
 }
 
+.activity-page-heading {
+  box-shadow: var(--shadow-sm);
+}
+
+.activity-page-brand .product-mark {
+  width: 32px;
+  height: 32px;
+}
+
+.activity-page-brand-copy strong {
+  letter-spacing: -0.035em;
+}
+
 .activity-page-heading h1 {
   font-weight: 780;
   letter-spacing: -0.03em;
+}
+
+.activity-page-heading .back-button {
+  height: 48px;
+  min-height: 48px;
+  text-decoration: none;
+}
+
+.activity-page-heading .back-button:hover {
+  border-color: var(--line-strong);
+  color: var(--blue-strong);
+}
+
+.activity-new-records,
+.activity-new-records > button {
+  border-radius: 0;
+}
+
+.activity-new-records {
+  border-color: var(--blue-line);
+  background: var(--blue-soft);
+  color: var(--blue-strong);
+}
+
+.activity-poll-status {
+  border-radius: 0;
+}
+
+.activity-poll-status.is-ok {
+  border-color: var(--up-line);
+  background: var(--up-bg);
+}
+
+.activity-poll-status.is-ok .status-dot {
+  background: var(--up);
+}
+
+.activity-poll-status.is-error {
+  border-color: var(--down-line);
+  background: var(--down-bg);
+}
+
+.activity-poll-status.is-error .status-dot {
+  background: var(--down);
 }
 
 .activity-full-list {
@@ -840,6 +897,36 @@ a:focus-visible {
     border-right: none;
     border-bottom: 1px solid var(--line);
   }
+
+  .activity-page-heading {
+    grid-template-columns: auto minmax(180px, 1fr) auto;
+  }
+
+  .activity-page-brand {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .activity-page-title {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .activity-page-heading .back-button {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .activity-page-statuses {
+    grid-column: 2 / 4;
+    grid-row: 2;
+  }
+
+  .activity-poll-status,
+  .activity-new-records {
+    min-width: 0;
+    flex: 1 1 0;
+  }
 }
 
 @media (max-width: 560px) {
@@ -849,6 +936,52 @@ a:focus-visible {
 
   .activity-heading {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .activity-view {
+    padding: 12px 9px;
+  }
+
+  .activity-page-heading {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .activity-page-brand {
+    min-width: 0;
+  }
+
+  .activity-page-brand-copy small {
+    display: none;
+  }
+
+  .activity-page-title {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    padding: 8px 0 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .activity-page-heading .back-button {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .activity-page-statuses {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    min-width: 0;
+    flex-direction: column;
+  }
+
+  .activity-poll-status,
+  .activity-new-records {
+    width: 100%;
+    min-width: 0;
+    flex: 0 0 48px;
   }
 }
 

@@ -21,6 +21,7 @@ const state = {
   seenAlertIds: new Set(),
   alertsInitialized: false,
   alertMonitorRequestId: 0,
+  alertMonitorInFlight: false,
   notificationPermissionRequested: false,
   dashboardRequests: { bootstrap: 0, screenings: 0, alerts: 0 },
   expandedScreenings: new Set(),
@@ -35,11 +36,19 @@ const state = {
     requestId: 0,
     filters: { targetId: "", screeningId: "", kind: "" },
   },
+  liveSync: {
+    inFlight: false,
+    activityHeadId: null,
+    activityFilterKey: "",
+    pendingHeadId: null,
+    pendingNewCount: 0,
+  },
 };
 
 const byId = (id) => document.getElementById(id);
 const csrfHeader = { "X-MovieMax-CSRF": "1" };
 const activityPath = window.location.pathname.replace(/\/+$/, "") === "/activity";
+const liveSyncIntervalMs = 3000;
 let toastTimer;
 let dialogReturnFocus = null;
 
@@ -203,6 +212,8 @@ function notifyIncreaseAlert(alert) {
 }
 
 async function monitorIncreaseAlerts() {
+  if (state.alertMonitorInFlight) return;
+  state.alertMonitorInFlight = true;
   const requestId = state.alertMonitorRequestId + 1;
   state.alertMonitorRequestId = requestId;
   const params = new URLSearchParams({
@@ -210,19 +221,23 @@ async function monitorIncreaseAlerts() {
     kind: "seat_increases",
     notifications_only: "true",
   });
-  const data = await api(`/api/v1/activity?${params.toString()}`);
-  if (requestId !== state.alertMonitorRequestId) return;
-  const alerts = Array.isArray(data.items)
-    ? data.items
-    : Array.isArray(data.activity) ? data.activity : [];
-  if (state.alertsInitialized) {
-    alerts
-      .filter((item) => item.kind === "seat_increases" && !state.seenAlertIds.has(String(item.id)))
-      .reverse()
-      .forEach(notifyIncreaseAlert);
+  try {
+    const data = await api(`/api/v1/activity?${params.toString()}`);
+    if (requestId !== state.alertMonitorRequestId) return;
+    const alerts = Array.isArray(data.items)
+      ? data.items
+      : Array.isArray(data.activity) ? data.activity : [];
+    if (state.alertsInitialized) {
+      alerts
+        .filter((item) => item.kind === "seat_increases" && !state.seenAlertIds.has(String(item.id)))
+        .reverse()
+        .forEach(notifyIncreaseAlert);
+    }
+    alerts.forEach((item) => state.seenAlertIds.add(String(item.id)));
+    state.alertsInitialized = true;
+  } finally {
+    state.alertMonitorInFlight = false;
   }
-  alerts.forEach((item) => state.seenAlertIds.add(String(item.id)));
-  state.alertsInitialized = true;
 }
 
 function humanDateTime(value) {
@@ -481,6 +496,7 @@ function updateLiveTimes() {
     else metric.removeAttribute("datetime");
   }
   updateRelativeTimes(now);
+  updateActivityPollCountdown(now);
   syncRefreshButton(target);
 }
 
@@ -1096,6 +1112,115 @@ function activityFilterDescription() {
   return parts.length ? parts.join(" · ") : "전체 조건";
 }
 
+function activityFiltersKey(filters = state.activityLog.filters) {
+  return JSON.stringify([
+    String(filters.targetId || ""),
+    String(filters.screeningId || ""),
+    String(filters.kind || ""),
+  ]);
+}
+
+function activityQueryParams({ limit = 20, cursor = null } = {}) {
+  const filters = state.activityLog.filters;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (cursor !== null && cursor !== undefined && cursor !== "") params.set("cursor", String(cursor));
+  if (filters.targetId) params.set("target_id", String(filters.targetId));
+  if (filters.screeningId) params.set("screening_id", String(filters.screeningId));
+  if (filters.kind) params.set("kind", filters.kind);
+  return params;
+}
+
+function activityHeadId(items) {
+  if (!Array.isArray(items) || !items.length || items[0]?.id === undefined || items[0]?.id === null) return null;
+  return String(items[0].id);
+}
+
+function clearPendingActivityRecords() {
+  state.liveSync.pendingHeadId = null;
+  state.liveSync.pendingNewCount = 0;
+  const notice = byId("activityNewRecords");
+  if (notice) notice.hidden = true;
+}
+
+function showPendingActivityRecords(items) {
+  const previousHeadId = state.liveSync.activityHeadId;
+  const newHeadId = activityHeadId(items);
+  if (newHeadId === null || newHeadId === previousHeadId) return;
+  const previousIndex = previousHeadId === null
+    ? -1
+    : items.findIndex((item) => String(item.id) === previousHeadId);
+  state.liveSync.pendingHeadId = newHeadId;
+  state.liveSync.pendingNewCount = previousIndex > 0 ? previousIndex : previousIndex === 0 ? 0 : 20;
+  const notice = byId("activityNewRecords");
+  const text = byId("activityNewRecordsText");
+  if (text) {
+    text.textContent = previousIndex > 0
+      ? `새 감지 기록 ${previousIndex}건이 있습니다.`
+      : previousHeadId === null
+        ? "새 감지 기록이 있습니다."
+        : "새 감지 기록이 20건 이상 있습니다.";
+  }
+  if (notice) notice.hidden = false;
+}
+
+function activityCountdownTarget() {
+  const filteredTargetId = state.activityLog.filters.targetId;
+  if (filteredTargetId) {
+    return state.targets.find((target) => String(target.id) === String(filteredTargetId)) || null;
+  }
+  const enabledTargets = state.targets.filter((target) => target.enabled);
+  if (!enabledTargets.length) return null;
+  const phasePriority = { running: 0, queued: 1, idle: 2, disabled: 3 };
+  return [...enabledTargets].sort((left, right) => {
+    const phaseDifference = phasePriority[refreshPhase(left)] - phasePriority[refreshPhase(right)];
+    if (phaseDifference !== 0) return phaseDifference;
+    const leftAt = timestampMs(left.next_poll_at) ?? Number.POSITIVE_INFINITY;
+    const rightAt = timestampMs(right.next_poll_at) ?? Number.POSITIVE_INFINITY;
+    return leftAt - rightAt;
+  })[0];
+}
+
+function activityPollCountdownState(now = Date.now() + state.serverClockOffsetMs) {
+  const target = activityCountdownTarget();
+  if (!target) return { value: "—", label: "활성 감시 대상 없음", ok: false, error: false };
+  const context = `${target.movie_name} · ${targetFormatLabel(target)}`;
+  const phase = refreshPhase(target);
+  const error = Boolean(target.last_error);
+  const label = `${context} · ${error ? "조회 오류" : phase === "disabled" ? "감지 중지" : "감지 정상"}`;
+  if (phase === "disabled") return { value: "중지", label, ok: false, error };
+  if (phase === "running") return { value: "조회 중", label, ok: !error, error };
+  if (phase === "queued") return { value: "대기 중", label, ok: !error, error };
+  const nextPollAt = timestampMs(target.next_poll_at);
+  if (nextPollAt === null) return { value: "계산 중", label, ok: !error, error };
+  const remainingSeconds = Math.max(0, Math.ceil((nextPollAt - now) / 1000));
+  return {
+    value: remainingSeconds > 0 ? `${remainingSeconds}초` : "대기 중",
+    label,
+    ok: !error,
+    error,
+  };
+}
+
+function updateActivityPollCountdown(now = Date.now() + state.serverClockOffsetMs) {
+  if (!activityPath) return;
+  const countdown = activityPollCountdownState(now);
+  const dedicated = byId("activityPollCountdown");
+  if (dedicated) {
+    dedicated.textContent = countdown.value;
+    const workerLabel = byId("activityWorkerLabel");
+    if (workerLabel) workerLabel.textContent = countdown.label;
+    const status = byId("activityPollStatus");
+    status?.classList.toggle("is-ok", countdown.ok);
+    status?.classList.toggle("is-error", countdown.error);
+    return;
+  }
+  const result = byId("activityResultText");
+  if (!result) return;
+  const base = result.dataset.baseText || result.textContent;
+  result.dataset.baseText = base;
+  result.textContent = `${base} · ${countdown.label} · 다음 조회 ${countdown.value}`;
+}
+
 function renderActivityPage() {
   const log = state.activityLog;
   const list = byId("activityFullList");
@@ -1109,31 +1234,34 @@ function renderActivityPage() {
         ${activityDetailsHtml(item)}
       </article>`).join("");
   }
-  byId("activityResultText").textContent = `${activityFilterDescription()} · ${log.page}페이지 · ${log.items.length}건`;
+  const resultText = `${activityFilterDescription()} · ${log.page}페이지 · ${log.items.length}건`;
+  byId("activityResultText").dataset.baseText = resultText;
+  byId("activityResultText").textContent = resultText;
   byId("activityPageStatus").textContent = `${log.page}페이지`;
   byId("prevActivityPage").disabled = log.loading || log.page <= 1;
   byId("nextActivityPage").disabled = log.loading || !log.hasMore || log.nextCursor === null;
   byId("applyActivityFilters").disabled = log.loading;
   byId("resetActivityFilters").disabled = log.loading;
+  updateActivityPollCountdown();
 }
 
 async function loadActivityPage(cursor = null, { page = 1, reset = false } = {}) {
   const log = state.activityLog;
   const requestId = log.requestId + 1;
+  const filterKey = activityFiltersKey();
   log.requestId = requestId;
   log.loading = true;
-  if (reset) log.pageCursors = [null];
+  if (reset) {
+    log.pageCursors = [null];
+    clearPendingActivityRecords();
+  }
   renderActivityPage();
 
-  const params = new URLSearchParams({ limit: "20" });
-  if (cursor !== null && cursor !== undefined && cursor !== "") params.set("cursor", String(cursor));
-  if (log.filters.targetId) params.set("target_id", String(log.filters.targetId));
-  if (log.filters.screeningId) params.set("screening_id", String(log.filters.screeningId));
-  if (log.filters.kind) params.set("kind", log.filters.kind);
+  const params = activityQueryParams({ limit: 20, cursor });
 
   try {
     const data = await api(`/api/v1/activity?${params.toString()}`);
-    if (requestId !== log.requestId) return;
+    if (requestId !== log.requestId || filterKey !== activityFiltersKey()) return;
     const items = Array.isArray(data.items)
       ? data.items
       : Array.isArray(data.activity) ? data.activity : [];
@@ -1143,11 +1271,79 @@ async function loadActivityPage(cursor = null, { page = 1, reset = false } = {})
     log.hasMore = typeof data.has_more === "boolean"
       ? data.has_more
       : log.nextCursor !== null;
+    if (page === 1) {
+      state.liveSync.activityFilterKey = filterKey;
+      state.liveSync.activityHeadId = activityHeadId(items);
+      clearPendingActivityRecords();
+    }
   } finally {
     if (requestId === log.requestId) {
       log.loading = false;
       renderActivityPage();
     }
+  }
+}
+
+async function syncFullActivityLive() {
+  const log = state.activityLog;
+  if (log.loading) return;
+  const filterKey = activityFiltersKey();
+  const page = log.page;
+  const requestId = log.requestId;
+  const params = activityQueryParams({ limit: 20 });
+  const data = await api(`/api/v1/activity?${params.toString()}`);
+  if (log.loading
+      || requestId !== log.requestId
+      || page !== log.page
+      || filterKey !== activityFiltersKey()) return;
+
+  const items = Array.isArray(data.items)
+    ? data.items
+    : Array.isArray(data.activity) ? data.activity : [];
+  if (page !== 1) {
+    if (state.liveSync.activityFilterKey === filterKey) showPendingActivityRecords(items);
+    return;
+  }
+
+  const nextCursor = data.next_cursor ?? null;
+  const hasMore = typeof data.has_more === "boolean"
+    ? data.has_more
+    : nextCursor !== null;
+  const contentChanged = JSON.stringify(log.items) !== JSON.stringify(items)
+    || log.nextCursor !== nextCursor
+    || log.hasMore !== hasMore;
+  log.items = items;
+  log.nextCursor = nextCursor;
+  log.hasMore = hasMore;
+  state.liveSync.activityFilterKey = filterKey;
+  state.liveSync.activityHeadId = activityHeadId(items);
+  clearPendingActivityRecords();
+  if (contentChanged) renderActivityPage();
+}
+
+async function showLatestActivity() {
+  await loadActivityPage(null, { page: 1, reset: true });
+  byId("activityViewTitle")?.focus({ preventScroll: true });
+}
+
+function reportBackgroundError(error) {
+  console.warn("MovieMax background sync failed", error);
+}
+
+async function syncLiveView({ force = false } = {}) {
+  if ((!force && document.hidden) || state.liveSync.inFlight) return;
+  const workspace = document.querySelector(".workspace");
+  if (workspace?.getAttribute("aria-busy") === "true") return;
+  state.liveSync.inFlight = true;
+  try {
+    if (activityPath) {
+      await syncFullActivityLive();
+      return;
+    }
+    const targetId = state.selectedTargetId;
+    if (targetId) await loadRecentAlerts(targetId);
+  } finally {
+    state.liveSync.inFlight = false;
   }
 }
 
@@ -1959,6 +2155,7 @@ byId("activityFilterForm").addEventListener("submit", (event) => applyActivityFi
 byId("resetActivityFilters").addEventListener("click", () => resetActivityFilters().catch(reportError));
 byId("prevActivityPage").addEventListener("click", () => changeActivityPage(-1).catch(reportError));
 byId("nextActivityPage").addEventListener("click", () => changeActivityPage(1).catch(reportError));
+byId("showLatestActivity")?.addEventListener("click", () => showLatestActivity().catch(reportError));
 
 [byId("botToken"), byId("chatId")].forEach((input) => {
   input.addEventListener("input", () => telegramFeedback("변경사항이 아직 저장되지 않았습니다.", "info"));
@@ -1977,6 +2174,18 @@ loadBootstrap({ preserveSelection: false })
   .catch(reportError);
 setInterval(updateLiveTimes, 1000);
 setInterval(() => {
-  if (!document.hidden && !document.querySelector("dialog[open]")) loadBootstrap().catch(reportError);
-  monitorIncreaseAlerts().catch(reportError);
+  syncLiveView().catch(reportBackgroundError);
+  monitorIncreaseAlerts().catch(reportBackgroundError);
+}, liveSyncIntervalMs);
+setInterval(() => {
+  const workspace = document.querySelector(".workspace");
+  if (!document.hidden
+      && !document.querySelector("dialog[open]")
+      && workspace?.getAttribute("aria-busy") !== "true") {
+    loadBootstrap().catch(reportBackgroundError);
+  }
 }, 10000);
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) syncLiveView({ force: true }).catch(reportBackgroundError);
+});
