@@ -1078,7 +1078,7 @@ async function changeActivityPage(direction) {
 function initializePathView() {
   byId("overviewView").classList.toggle("is-hidden", activityPath);
   byId("activityView").classList.toggle("is-hidden", !activityPath);
-  if (activityPath) document.title = "전체 감지 기록 · MovieMax";
+  if (activityPath) document.title = "전체 감지 기록 · max.wondering";
 }
 
 function renderTelegram() {
