@@ -26,7 +26,7 @@ from moviemax.console_store import (
     ConsoleStore,
     StaleVersionError,
 )
-from moviemax.polling import MAX_POLL_JITTER_SECONDS
+from moviemax.polling import MAX_POLL_JITTER_SECONDS, MIN_POLL_INTERVAL_SECONDS
 from moviemax.telegram import TelegramClient, TelegramError
 from moviemax.web_push import WebPushClient, WebPushError
 
@@ -67,7 +67,11 @@ class TargetCreate(StrictModel):
     movie_name: str
     format_code: str
     format_name: str
-    poll_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
+    poll_interval_seconds: int | None = Field(
+        default=None,
+        ge=MIN_POLL_INTERVAL_SECONDS,
+        le=3600,
+    )
     poll_jitter_seconds: int | None = Field(
         default=None,
         ge=0,
@@ -100,7 +104,11 @@ class TargetUpdate(StrictModel):
     enabled: bool | None = None
     notify_new: bool | None = None
     auto_track_new: bool | None = None
-    poll_interval_seconds: int | None = Field(default=None, ge=30, le=3600)
+    poll_interval_seconds: int | None = Field(
+        default=None,
+        ge=MIN_POLL_INTERVAL_SECONDS,
+        le=3600,
+    )
     poll_jitter_seconds: int | None = Field(
         default=None,
         ge=0,

@@ -384,7 +384,7 @@ function updatePollSettingsPreview({ announce = false } = {}) {
   if (valid) {
     byId("pollRange").textContent = `현재 실효 범위 ${interval}~${interval + jitter}초 (무작위 추가 0~${jitter}초)`;
   } else {
-    byId("pollRange").textContent = "기본 간격 30~3600초, 최대 추가 지연 0~300초를 입력하세요.";
+    byId("pollRange").textContent = "기본 간격 5~3600초, 최대 추가 지연 0~300초를 입력하세요.";
   }
   const changed = Boolean(target) && valid
     && (interval !== Number(target.poll_interval_seconds)

@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from moviemax.polling import MAX_POLL_JITTER_SECONDS
+from moviemax.polling import MAX_POLL_JITTER_SECONDS, MIN_POLL_INTERVAL_SECONDS
 
 
 class ConfigError(ValueError):
@@ -167,8 +167,10 @@ class Settings:
             raise ConfigError(
                 "A format code, keyword, or screen grade code is required"
             )
-        if self.poll_interval_seconds < 30:
-            raise ConfigError("POLL_INTERVAL_SECONDS must be at least 30")
+        if self.poll_interval_seconds < MIN_POLL_INTERVAL_SECONDS:
+            raise ConfigError(
+                f"POLL_INTERVAL_SECONDS must be at least {MIN_POLL_INTERVAL_SECONDS}"
+            )
         if not 0 <= self.poll_jitter_seconds <= MAX_POLL_JITTER_SECONDS:
             raise ConfigError(
                 f"POLL_JITTER_SECONDS must be between 0 and {MAX_POLL_JITTER_SECONDS}"

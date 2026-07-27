@@ -440,6 +440,7 @@ def test_console_serves_modernist_assets_without_secrets(console_context) -> Non
     assert 'id="bulkThresholdForm"' in page.text
     assert 'id="bulkThreshold"' in page.text
     assert 'max="9007199254740991"' in page.text
+    assert 'id="pollInterval" type="number" min="5" max="3600"' in page.text
     assert 'id="pollJitter" type="number" min="0" max="300"' in page.text
     assert re.search(r'id="chatId"[^>]*\brequired\b', page.text)
     assert 'id="telegramFeedback"' in page.text

@@ -76,6 +76,18 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
                     format_keyword, screen_grade_code
                 )
             );
+            CREATE TABLE console_screenings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id INTEGER NOT NULL REFERENCES watch_targets(id)
+                    ON DELETE CASCADE,
+                screening_key TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 1,
+                active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                UNIQUE(target_id, screening_key)
+            );
             """
         )
         connection.execute(
@@ -97,6 +109,14 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
                 now,
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO console_screenings(
+                target_id, screening_key, payload_json, first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (1, "legacy-screening", "{}", now, now),
+        )
 
     store = ConsoleStore(database, Fernet.generate_key().decode("ascii"))
 
@@ -112,13 +132,29 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
     )
     assert existing["id"] == 1
     assert len(store.list_targets()) == 1
+    updated = store.update_target(
+        existing["id"],
+        expected_version=existing["version"],
+        poll_interval_seconds=5,
+    )
+    assert updated["poll_interval_seconds"] == 5
     with sqlite3.connect(database) as connection:
         columns = {
             row[1]: row
             for row in connection.execute("PRAGMA table_info(watch_targets)")
         }
+        target_schema = connection.execute(
+            "SELECT sql FROM sqlite_schema WHERE name = 'watch_targets'"
+        ).fetchone()[0]
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+        migrated_screening = connection.execute(
+            "SELECT target_id, screening_key FROM console_screenings"
+        ).fetchone()
     assert columns["poll_jitter_seconds"][4] == "5"
     assert columns["format_code"][4] == "''"
+    assert "CHECK(poll_interval_seconds >= 5)" in target_schema
+    assert "CHECK(poll_interval_seconds >= 30)" not in target_schema
+    assert migrated_screening == (1, "legacy-screening")
 
     first_format = store.create_target(
         site_no="0013",
@@ -217,6 +253,9 @@ def test_worker_failure_backoff_adds_target_jitter(tmp_path, monkeypatch) -> Non
 
 
 def test_poll_jitter_validation_and_target_api(tmp_path) -> None:
+    Settings(poll_interval_seconds=5).validate()
+    with pytest.raises(ConfigError, match="at least 5"):
+        Settings(poll_interval_seconds=4).validate()
     with pytest.raises(ConfigError, match="between 0 and 300"):
         Settings(poll_jitter_seconds=301).validate()
 
@@ -234,7 +273,7 @@ def test_poll_jitter_validation_and_target_api(tmp_path) -> None:
         "movie_name": "Odyssey",
         "format_code": "48",
         "format_name": "IMAX LASER 2D",
-        "poll_interval_seconds": 75,
+        "poll_interval_seconds": 5,
         "poll_jitter_seconds": 17,
     }
 
@@ -249,9 +288,15 @@ def test_poll_jitter_validation_and_target_api(tmp_path) -> None:
             json={**payload, "movie_no": "movie-2", "poll_jitter_seconds": 301},
             headers=headers,
         )
+        too_fast_response = client.post(
+            "/api/v1/targets",
+            json={**payload, "movie_no": "movie-3", "poll_interval_seconds": 4},
+            headers=headers,
+        )
 
     assert created_response.status_code == 201
     created = created_response.json()["target"]
-    assert created["poll_interval_seconds"] == 75
+    assert created["poll_interval_seconds"] == 5
     assert created["poll_jitter_seconds"] == 17
     assert invalid_response.status_code == 422
+    assert too_fast_response.status_code == 422

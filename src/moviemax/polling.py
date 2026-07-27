@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 
+MIN_POLL_INTERVAL_SECONDS = 5
 MAX_POLL_JITTER_SECONDS = 300
 
 

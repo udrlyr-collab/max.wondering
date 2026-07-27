@@ -44,9 +44,9 @@ def test_dashboard_loads_spacious_refined_visual_layer() -> None:
     page = (ASSET_DIR / "index.html").read_text(encoding="utf-8")
     stylesheet = (ASSET_DIR / "refined.css").read_text(encoding="utf-8")
 
-    assert "/assets/refined.css?v=20260727-4" in page
-    assert "/assets/styles.css?v=20260727-4" in page
-    assert "/assets/app.js?v=20260727-4" in page
+    assert "/assets/refined.css?v=20260727-5" in page
+    assert "/assets/styles.css?v=20260727-5" in page
+    assert "/assets/app.js?v=20260727-5" in page
     assert 'class="product-brand"' in page
     assert "--page-gutter: clamp(18px, 2vw, 32px)" in stylesheet
     assert "--surface-strong: #171a17" in stylesheet

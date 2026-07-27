@@ -175,7 +175,7 @@ python -m moviemax check-cgv
 | `CGV_MOVIE_NO`, `CGV_MOVIE_NAME` | 처음 생성할 기본 영화 번호와 표시 이름. 현재 예시는 오디세이 `30001323`입니다. |
 | `CGV_FORMAT_CODE` | 기본 대상의 CGV 상영 포맷 코드. 값이 있으면 정확히 일치하는 코드만 조회합니다. 콘솔에서 추가한 대상은 CGV 카탈로그의 현재 코드를 자동 저장합니다. |
 | `CGV_FORMAT_KEYWORD`, `CGV_SCREEN_GRADE_CODE` | 코드가 없는 기존 기본 대상의 호환 필터. 현재 IMAX 예시는 `IMAX`, `0301`입니다. |
-| `POLL_INTERVAL_SECONDS` | 처음 생성하는 기본 대상의 조회 주기. 30초 미만은 거부되며 예시는 60초입니다. 콘솔에서 새로 추가한 대상은 현재 60초로 생성됩니다. |
+| `POLL_INTERVAL_SECONDS` | 처음 생성하는 기본 대상의 조회 주기. 5초 미만은 거부되며 예시는 60초입니다. 콘솔에서 새로 추가한 대상은 현재 60초로 생성됩니다. |
 | `REQUEST_TIMEOUT_SECONDS` | CGV, Telegram, Web Push 요청 제한 시간. |
 | `REQUEST_GAP_SECONDS` | 여러 날짜의 CGV 일정을 연속 조회할 때 요청 사이에 두는 간격. |
 | `BACKOFF_MAX_SECONDS` | CGV 조회 실패 시 지수 백오프의 상한. `POLL_INTERVAL_SECONDS`보다 작을 수 없습니다. |
@@ -402,4 +402,4 @@ sudo docker compose -f compose.yaml -f compose.secrets.yaml run --rm worker chec
 
 한 번의 대상 조회는 먼저 `searchSiteScnscYmdListByMov`를 호출해 상영 날짜 목록을 받고, 각 날짜마다 `searchSchByMov`를 한 번씩 호출합니다. 날짜별 시간표 응답에는 해당 영화의 여러 회차와 각 회차의 잔여석이 함께 들어오므로, 알림 회차 선택 여부는 CGV 요청 수를 바꾸지 않습니다. 날짜 수가 `D`개이면 정상 조회 한 주기의 요청 수는 `1 + D`회입니다. 선택하지 않은 회차도 마지막 조회 잔여석은 갱신되며, 선택은 좌석 증가 알림 여부와 기준값만 제어합니다.
 
-`POLL_INTERVAL_SECONDS`는 30초 미만으로 설정할 수 없습니다. 다음 조회 시각은 한 주기의 응답 처리가 끝난 뒤 기본 간격과 무작위 오프셋을 더해 정하므로 실제 조회 시작 간격에는 CGV 응답 시간과 최대 `CONSOLE_WORKER_TICK_SECONDS`의 워커 확인 지연도 포함됩니다. 기본 60초를 유지하고 불필요하게 짧은 주기로 변경하지 마세요. 표시되는 좌석은 마지막 정상 조회 시점의 CGV 응답이며 실시간 좌석 보장을 의미하지 않습니다.
+`POLL_INTERVAL_SECONDS`는 5초 미만으로 설정할 수 없습니다. 다음 조회 시각은 한 주기의 응답 처리가 끝난 뒤 기본 간격과 무작위 오프셋을 더해 정하므로 실제 조회 시작 간격에는 CGV 응답 시간과 최대 `CONSOLE_WORKER_TICK_SECONDS`의 워커 확인 지연도 포함됩니다. 5초 설정은 CGV 요청 빈도를 크게 늘리므로 필요한 대상에만 사용하세요. 표시되는 좌석은 마지막 정상 조회 시점의 CGV 응답이며 실시간 좌석 보장을 의미하지 않습니다.

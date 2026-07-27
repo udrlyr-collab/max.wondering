@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
@@ -17,7 +18,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 
 from moviemax.locking import BlockingFileLock
 from moviemax.models import OutboxEvent, Screening, WebPushDelivery
-from moviemax.polling import jittered_delay_seconds, normalize_poll_jitter_seconds
+from moviemax.polling import (
+    MIN_POLL_INTERVAL_SECONDS,
+    jittered_delay_seconds,
+    normalize_poll_jitter_seconds,
+)
 
 
 class StaleVersionError(RuntimeError):
@@ -158,7 +163,7 @@ class ConsoleStore:
                         CHECK(initialized IN (0, 1)),
                     state TEXT NOT NULL DEFAULT 'idle',
                     poll_interval_seconds INTEGER NOT NULL DEFAULT 60
-                        CHECK(poll_interval_seconds >= 30),
+                        CHECK(poll_interval_seconds >= 5),
                     poll_jitter_seconds INTEGER NOT NULL DEFAULT 5
                         CHECK(poll_jitter_seconds BETWEEN 0 AND 300),
                     next_poll_at TEXT,
@@ -378,6 +383,97 @@ class ConsoleStore:
                 """
             )
             self._ensure_web_push_vapid(connection)
+        self._migrate_poll_interval_floor()
+
+    def _migrate_poll_interval_floor(self) -> None:
+        """Rebuild legacy target tables whose interval CHECK still starts at 30."""
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT sql FROM sqlite_schema "
+                "WHERE type = 'table' AND name = 'watch_targets'"
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("watch_targets table is missing")
+            definition = re.sub(r"\s+", "", str(row["sql"] or "")).lower()
+            if "check(poll_interval_seconds>=30)" not in definition:
+                return
+
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                CREATE TABLE watch_targets_poll_floor_v2 (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    company_code TEXT NOT NULL,
+                    site_no TEXT NOT NULL,
+                    site_name TEXT NOT NULL,
+                    movie_no TEXT NOT NULL,
+                    movie_name TEXT NOT NULL,
+                    format_code TEXT NOT NULL DEFAULT '',
+                    format_keyword TEXT NOT NULL,
+                    screen_grade_code TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                    notify_new INTEGER NOT NULL DEFAULT 1 CHECK(notify_new IN (0, 1)),
+                    auto_track_new INTEGER NOT NULL DEFAULT 0
+                        CHECK(auto_track_new IN (0, 1)),
+                    initialized INTEGER NOT NULL DEFAULT 0
+                        CHECK(initialized IN (0, 1)),
+                    state TEXT NOT NULL DEFAULT 'idle',
+                    poll_interval_seconds INTEGER NOT NULL DEFAULT 60
+                        CHECK(poll_interval_seconds >= 5),
+                    poll_jitter_seconds INTEGER NOT NULL DEFAULT 5
+                        CHECK(poll_jitter_seconds BETWEEN 0 AND 300),
+                    next_poll_at TEXT,
+                    refresh_requested_at TEXT,
+                    last_started_at TEXT,
+                    last_success_at TEXT,
+                    last_failure_at TEXT,
+                    last_error TEXT,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(
+                        company_code, site_no, movie_no,
+                        format_code, format_keyword, screen_grade_code
+                    )
+                )
+                """
+            )
+            columns = (
+                "id, company_code, site_no, site_name, movie_no, movie_name, "
+                "format_code, format_keyword, screen_grade_code, enabled, "
+                "notify_new, auto_track_new, initialized, state, "
+                "poll_interval_seconds, poll_jitter_seconds, next_poll_at, "
+                "refresh_requested_at, last_started_at, last_success_at, "
+                "last_failure_at, last_error, consecutive_failures, version, "
+                "created_at, updated_at"
+            )
+            connection.execute(
+                f"INSERT INTO watch_targets_poll_floor_v2({columns}) "
+                f"SELECT {columns} FROM watch_targets"
+            )
+            connection.execute("DROP TABLE watch_targets")
+            connection.execute(
+                "ALTER TABLE watch_targets_poll_floor_v2 RENAME TO watch_targets"
+            )
+            connection.execute(
+                "CREATE INDEX idx_watch_targets_due "
+                "ON watch_targets(enabled, next_poll_at, id)"
+            )
+            violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise RuntimeError(
+                    "poll interval migration created foreign-key violations"
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.close()
 
     def _ensure_web_push_vapid(
         self,
@@ -473,8 +569,10 @@ class ConsoleStore:
             raise ValueError(
                 "target format code, keyword, or screen grade code is required"
             )
-        if result["poll_interval_seconds"] < 30:
-            raise ValueError("poll_interval_seconds must be at least 30")
+        if result["poll_interval_seconds"] < MIN_POLL_INTERVAL_SECONDS:
+            raise ValueError(
+                f"poll_interval_seconds must be at least {MIN_POLL_INTERVAL_SECONDS}"
+            )
         return result
 
     @staticmethod
@@ -752,8 +850,11 @@ class ConsoleStore:
                     normalized[field] = int(bool(value))
                 elif field == "poll_interval_seconds":
                     interval = int(value)
-                    if interval < 30:
-                        raise ValueError("poll_interval_seconds must be at least 30")
+                    if interval < MIN_POLL_INTERVAL_SECONDS:
+                        raise ValueError(
+                            "poll_interval_seconds must be at least "
+                            f"{MIN_POLL_INTERVAL_SECONDS}"
+                        )
                     normalized[field] = interval
                 elif field == "poll_jitter_seconds":
                     normalized[field] = normalize_poll_jitter_seconds(int(value))
