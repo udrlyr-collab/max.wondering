@@ -57,9 +57,14 @@ class OutboxEvent:
     payload: dict[str, Any]
     attempts: int
     delivered_parts: int
+    telegram_chat_id: str = ""
 
     @classmethod
     def from_row(cls, row: Mapping[str, Any]) -> OutboxEvent:
+        try:
+            telegram_chat_id = str(row["telegram_chat_id"] or "")
+        except (KeyError, IndexError):
+            telegram_chat_id = ""
         return cls(
             id=int(row["id"]),
             event_key=str(row["event_key"]),
@@ -67,6 +72,7 @@ class OutboxEvent:
             payload=json.loads(str(row["payload_json"])),
             attempts=int(row["attempts"]),
             delivered_parts=int(row["delivered_parts"]),
+            telegram_chat_id=telegram_chat_id,
         )
 
 

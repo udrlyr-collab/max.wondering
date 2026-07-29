@@ -91,6 +91,10 @@ class ConsoleStore:
         "enabled",
         "notify_new",
         "auto_track_new",
+        "telegram_enabled",
+        "telegram_chat_id",
+        "telegram_notify_new",
+        "telegram_notify_seat_increase",
         "poll_interval_seconds",
         "poll_jitter_seconds",
         "next_poll_at",
@@ -101,6 +105,10 @@ class ConsoleStore:
         "enabled",
         "notify_new",
         "auto_track_new",
+        "telegram_enabled",
+        "telegram_chat_id",
+        "telegram_notify_new",
+        "telegram_notify_seat_increase",
         "poll_interval_seconds",
         "poll_jitter_seconds",
     }
@@ -159,6 +167,13 @@ class ConsoleStore:
                     notify_new INTEGER NOT NULL DEFAULT 1 CHECK(notify_new IN (0, 1)),
                     auto_track_new INTEGER NOT NULL DEFAULT 0
                         CHECK(auto_track_new IN (0, 1)),
+                    telegram_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(telegram_enabled IN (0, 1)),
+                    telegram_chat_id TEXT NOT NULL DEFAULT '',
+                    telegram_notify_new INTEGER NOT NULL DEFAULT 1
+                        CHECK(telegram_notify_new IN (0, 1)),
+                    telegram_notify_seat_increase INTEGER NOT NULL DEFAULT 1
+                        CHECK(telegram_notify_seat_increase IN (0, 1)),
                     initialized INTEGER NOT NULL DEFAULT 0
                         CHECK(initialized IN (0, 1)),
                     state TEXT NOT NULL DEFAULT 'idle',
@@ -227,6 +242,8 @@ class ConsoleStore:
                     event_key TEXT NOT NULL UNIQUE,
                     kind TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
+                    telegram_chat_id TEXT,
+                    telegram_skipped_at TEXT,
                     created_at TEXT NOT NULL,
                     sent_at TEXT,
                     attempts INTEGER NOT NULL DEFAULT 0,
@@ -243,6 +260,14 @@ class ConsoleStore:
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
                     version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS telegram_chat_candidates (
+                    chat_id TEXT PRIMARY KEY,
+                    chat_type TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    discovered_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
 
@@ -323,6 +348,80 @@ class ConsoleStore:
                     "ALTER TABLE watch_targets "
                     "ADD COLUMN format_code TEXT NOT NULL DEFAULT ''"
                 )
+            telegram_target_columns_added = "telegram_enabled" not in target_columns
+            if "telegram_enabled" not in target_columns:
+                connection.execute(
+                    "ALTER TABLE watch_targets "
+                    "ADD COLUMN telegram_enabled INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK(telegram_enabled IN (0, 1))"
+                )
+            if "telegram_chat_id" not in target_columns:
+                connection.execute(
+                    "ALTER TABLE watch_targets "
+                    "ADD COLUMN telegram_chat_id TEXT NOT NULL DEFAULT ''"
+                )
+            if "telegram_notify_new" not in target_columns:
+                connection.execute(
+                    "ALTER TABLE watch_targets "
+                    "ADD COLUMN telegram_notify_new INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(telegram_notify_new IN (0, 1))"
+                )
+            if "telegram_notify_seat_increase" not in target_columns:
+                connection.execute(
+                    "ALTER TABLE watch_targets "
+                    "ADD COLUMN telegram_notify_seat_increase "
+                    "INTEGER NOT NULL DEFAULT 1 "
+                    "CHECK(telegram_notify_seat_increase IN (0, 1))"
+                )
+
+            outbox_columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(console_outbox)"
+                ).fetchall()
+            }
+            if "telegram_chat_id" not in outbox_columns:
+                connection.execute(
+                    "ALTER TABLE console_outbox ADD COLUMN telegram_chat_id TEXT"
+                )
+            if "telegram_skipped_at" not in outbox_columns:
+                connection.execute(
+                    "ALTER TABLE console_outbox ADD COLUMN telegram_skipped_at TEXT"
+                )
+
+            if telegram_target_columns_added:
+                legacy_config = connection.execute(
+                    "SELECT chat_id, enabled FROM telegram_config WHERE id = 1"
+                ).fetchone()
+                if legacy_config is not None and bool(legacy_config["enabled"]):
+                    legacy_chat_id = str(legacy_config["chat_id"])
+                    now = _now()
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO telegram_chat_candidates(
+                            chat_id, chat_type, title, discovered_at, updated_at
+                        ) VALUES (?, 'legacy', '기존 Telegram 수신자', ?, ?)
+                        """,
+                        (legacy_chat_id, now, now),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE watch_targets
+                        SET telegram_enabled = 1,
+                            telegram_chat_id = ?,
+                            telegram_notify_new = 1,
+                            telegram_notify_seat_increase = 1
+                        """,
+                        (legacy_chat_id,),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE console_outbox
+                        SET telegram_chat_id = ?
+                        WHERE telegram_chat_id IS NULL
+                        """,
+                        (legacy_chat_id,),
+                    )
 
             screening_columns = {
                 str(row["name"])
@@ -417,6 +516,13 @@ class ConsoleStore:
                     notify_new INTEGER NOT NULL DEFAULT 1 CHECK(notify_new IN (0, 1)),
                     auto_track_new INTEGER NOT NULL DEFAULT 0
                         CHECK(auto_track_new IN (0, 1)),
+                    telegram_enabled INTEGER NOT NULL DEFAULT 0
+                        CHECK(telegram_enabled IN (0, 1)),
+                    telegram_chat_id TEXT NOT NULL DEFAULT '',
+                    telegram_notify_new INTEGER NOT NULL DEFAULT 1
+                        CHECK(telegram_notify_new IN (0, 1)),
+                    telegram_notify_seat_increase INTEGER NOT NULL DEFAULT 1
+                        CHECK(telegram_notify_seat_increase IN (0, 1)),
                     initialized INTEGER NOT NULL DEFAULT 0
                         CHECK(initialized IN (0, 1)),
                     state TEXT NOT NULL DEFAULT 'idle',
@@ -444,7 +550,9 @@ class ConsoleStore:
             columns = (
                 "id, company_code, site_no, site_name, movie_no, movie_name, "
                 "format_code, format_keyword, screen_grade_code, enabled, "
-                "notify_new, auto_track_new, initialized, state, "
+                "notify_new, auto_track_new, telegram_enabled, telegram_chat_id, "
+                "telegram_notify_new, telegram_notify_seat_increase, "
+                "initialized, state, "
                 "poll_interval_seconds, poll_jitter_seconds, next_poll_at, "
                 "refresh_requested_at, last_started_at, last_success_at, "
                 "last_failure_at, last_error, consecutive_failures, version, "
@@ -515,7 +623,15 @@ class ConsoleStore:
     @staticmethod
     def _target_from_row(row: sqlite3.Row) -> dict[str, Any]:
         result = dict(row)
-        for field in ("enabled", "notify_new", "auto_track_new", "initialized"):
+        for field in (
+            "enabled",
+            "notify_new",
+            "auto_track_new",
+            "telegram_enabled",
+            "telegram_notify_new",
+            "telegram_notify_seat_increase",
+            "initialized",
+        ):
             result[field] = bool(result[field])
         return result
 
@@ -542,6 +658,12 @@ class ConsoleStore:
             "enabled": bool(values.get("enabled", True)),
             "notify_new": bool(values.get("notify_new", True)),
             "auto_track_new": bool(values.get("auto_track_new", False)),
+            "telegram_enabled": bool(values.get("telegram_enabled", False)),
+            "telegram_chat_id": str(values.get("telegram_chat_id") or "").strip(),
+            "telegram_notify_new": bool(values.get("telegram_notify_new", True)),
+            "telegram_notify_seat_increase": bool(
+                values.get("telegram_notify_seat_increase", True)
+            ),
             "poll_interval_seconds": int(values.get("poll_interval_seconds", 60)),
             "poll_jitter_seconds": normalize_poll_jitter_seconds(
                 int(values.get("poll_jitter_seconds", 5))
@@ -573,7 +695,37 @@ class ConsoleStore:
             raise ValueError(
                 f"poll_interval_seconds must be at least {MIN_POLL_INTERVAL_SECONDS}"
             )
+        if len(result["telegram_chat_id"]) > 64:
+            raise ValueError("telegram_chat_id is too long")
+        if result["telegram_enabled"] and not result["telegram_chat_id"]:
+            raise ValueError("telegram_chat_id is required when Telegram is enabled")
         return result
+
+    @staticmethod
+    def _validate_target_telegram(
+        connection: sqlite3.Connection,
+        values: Mapping[str, Any],
+        *,
+        current_chat_id: str = "",
+    ) -> None:
+        if not bool(values.get("telegram_enabled")):
+            return
+        chat_id = str(values.get("telegram_chat_id") or "").strip()
+        if not chat_id:
+            raise ValueError("telegram_chat_id is required when Telegram is enabled")
+        configured = connection.execute(
+            "SELECT 1 FROM telegram_config WHERE id = 1"
+        ).fetchone()
+        if configured is None:
+            raise ValueError("Telegram bot must be configured first")
+        candidate = connection.execute(
+            "SELECT chat_type FROM telegram_chat_candidates WHERE chat_id = ?",
+            (chat_id,),
+        ).fetchone()
+        if candidate is None:
+            raise ValueError("selected Telegram user is not registered")
+        if str(candidate["chat_type"]) != "private" and chat_id != current_chat_id:
+            raise ValueError("selected Telegram chat is not a private user")
 
     @staticmethod
     def _insert_target(
@@ -589,9 +741,11 @@ class ConsoleStore:
             {action} INTO watch_targets(
                 company_code, site_no, site_name, movie_no, movie_name,
                 format_code, format_keyword, screen_grade_code, enabled, notify_new,
-                auto_track_new, state, poll_interval_seconds,
-                poll_jitter_seconds, next_poll_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                auto_track_new, telegram_enabled, telegram_chat_id,
+                telegram_notify_new, telegram_notify_seat_increase,
+                state, poll_interval_seconds, poll_jitter_seconds,
+                next_poll_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 values["company_code"],
@@ -605,6 +759,10 @@ class ConsoleStore:
                 int(values["enabled"]),
                 int(values["notify_new"]),
                 int(values["auto_track_new"]),
+                int(values["telegram_enabled"]),
+                values["telegram_chat_id"],
+                int(values["telegram_notify_new"]),
+                int(values["telegram_notify_seat_increase"]),
                 "idle" if values["enabled"] else "disabled",
                 values["poll_interval_seconds"],
                 values["poll_jitter_seconds"],
@@ -634,6 +792,7 @@ class ConsoleStore:
         defaults.update(overrides)
         values = self._target_values(defaults)
         with self._connection(immediate=True) as connection:
+            self._validate_target_telegram(connection, values)
             target_id = self._insert_target(connection, values, ignore_conflict=True)
             if target_id is None:
                 row = connection.execute(
@@ -671,6 +830,7 @@ class ConsoleStore:
         normalized = self._target_values(supplied)
         try:
             with self._connection(immediate=True) as connection:
+                self._validate_target_telegram(connection, normalized)
                 if normalized["format_code"]:
                     duplicate = connection.execute(
                         """
@@ -846,8 +1006,20 @@ class ConsoleStore:
 
             normalized: dict[str, Any] = {}
             for field, value in supplied.items():
-                if field in {"enabled", "notify_new", "auto_track_new"}:
+                if field in {
+                    "enabled",
+                    "notify_new",
+                    "auto_track_new",
+                    "telegram_enabled",
+                    "telegram_notify_new",
+                    "telegram_notify_seat_increase",
+                }:
                     normalized[field] = int(bool(value))
+                elif field == "telegram_chat_id":
+                    chat_id = str(value or "").strip()
+                    if len(chat_id) > 64:
+                        raise ValueError("telegram_chat_id is too long")
+                    normalized[field] = chat_id
                 elif field == "poll_interval_seconds":
                     interval = int(value)
                     if interval < MIN_POLL_INTERVAL_SECONDS:
@@ -863,6 +1035,24 @@ class ConsoleStore:
                     if not text:
                         raise ValueError(f"{field} cannot be empty")
                     normalized[field] = text
+
+            telegram_fields = {
+                "telegram_enabled",
+                "telegram_chat_id",
+                "telegram_notify_new",
+                "telegram_notify_seat_increase",
+            }
+            telegram_changed = bool(telegram_fields & normalized.keys())
+            if telegram_changed:
+                merged_telegram = {
+                    field: normalized.get(field, current[field])
+                    for field in telegram_fields
+                }
+                self._validate_target_telegram(
+                    connection,
+                    merged_telegram,
+                    current_chat_id=str(current["telegram_chat_id"] or ""),
+                )
 
             changed_timing = bool(
                 {"poll_interval_seconds", "poll_jitter_seconds"} & normalized.keys()
@@ -903,6 +1093,18 @@ class ConsoleStore:
             )
             if cursor.rowcount != 1:
                 raise StaleVersionError("target version changed during update")
+            if telegram_changed:
+                connection.execute(
+                    """
+                    UPDATE console_outbox
+                    SET sent_at = ?, telegram_skipped_at = ?,
+                        next_attempt_at = NULL, last_error = NULL
+                    WHERE target_id = ? AND sent_at IS NULL
+                      AND dead_lettered_at IS NULL
+                      AND telegram_chat_id IS NOT NULL
+                    """,
+                    (now.isoformat(), now.isoformat(), target_id),
+                )
             row = connection.execute(
                 "SELECT * FROM watch_targets WHERE id = ?",
                 (target_id,),
@@ -1213,12 +1415,34 @@ class ConsoleStore:
         created_at: str,
     ) -> bool:
         event_key = f"{target_id}:{screening_id}:{revision}:{kind}"
+        target = connection.execute(
+            """
+            SELECT telegram_enabled, telegram_chat_id,
+                   telegram_notify_new, telegram_notify_seat_increase
+            FROM watch_targets
+            WHERE id = ?
+            """,
+            (target_id,),
+        ).fetchone()
+        if target is None:
+            raise KeyError(f"target {target_id} does not exist")
+        telegram_kind_enabled = (
+            kind in {"new_screenings", "booking_opened"}
+            and bool(target["telegram_notify_new"])
+        ) or (
+            kind == "seat_increases" and bool(target["telegram_notify_seat_increase"])
+        )
+        telegram_chat_id = (
+            str(target["telegram_chat_id"])
+            if bool(target["telegram_enabled"]) and telegram_kind_enabled
+            else None
+        )
         cursor = connection.execute(
             """
             INSERT OR IGNORE INTO console_outbox(
                 target_id, screening_id, revision, event_key,
-                kind, payload_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                kind, payload_json, telegram_chat_id, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 target_id,
@@ -1227,6 +1451,7 @@ class ConsoleStore:
                 event_key,
                 kind,
                 _canonical_json(payload),
+                telegram_chat_id,
                 created_at,
             ),
         )
@@ -1702,7 +1927,12 @@ class ConsoleStore:
         notification: dict[str, Any] | None = None
         if row["notification_id"] is not None:
             notification_payload = json.loads(str(row["notification_payload_json"]))
-            if row["notification_sent_at"] is not None:
+            if (
+                row["notification_sent_at"] is not None
+                and row["notification_telegram_skipped_at"] is not None
+            ):
+                notification_status = "skipped"
+            elif row["notification_sent_at"] is not None:
                 notification_status = "sent"
             elif row["notification_dead_lettered_at"] is not None:
                 notification_status = "dead"
@@ -1716,6 +1946,8 @@ class ConsoleStore:
                 "sent_at": row["notification_sent_at"],
                 "attempts": int(row["notification_attempts"]),
                 "delivered_parts": int(row["notification_delivered_parts"]),
+                "telegram_chat_id": str(row["notification_telegram_chat_id"] or ""),
+                "telegram_skipped_at": row["notification_telegram_skipped_at"],
                 "next_attempt_at": row["notification_next_attempt_at"],
                 "dead_lettered_at": row["notification_dead_lettered_at"],
                 "last_error": row["notification_last_error"],
@@ -1836,6 +2068,8 @@ class ConsoleStore:
                         o.id AS notification_id,
                         o.kind AS notification_kind,
                         o.payload_json AS notification_payload_json,
+                        o.telegram_chat_id AS notification_telegram_chat_id,
+                        o.telegram_skipped_at AS notification_telegram_skipped_at,
                         o.created_at AS notification_created_at,
                         o.sent_at AS notification_sent_at,
                         o.attempts AS notification_attempts,
@@ -1969,7 +2203,7 @@ class ConsoleStore:
             rows = connection.execute(
                 """
                 SELECT id, event_key, kind, payload_json,
-                       attempts, delivered_parts
+                       attempts, delivered_parts, telegram_chat_id
                 FROM console_outbox
                 WHERE sent_at IS NULL
                   AND dead_lettered_at IS NULL
@@ -2011,6 +2245,20 @@ class ConsoleStore:
                 WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
                 """,
                 (_now(), event_id),
+            )
+            self._require_changed(cursor, event_id)
+
+    def mark_telegram_skipped(self, event_id: int) -> None:
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE console_outbox
+                SET sent_at = ?, telegram_skipped_at = ?,
+                    last_error = NULL, next_attempt_at = NULL
+                WHERE id = ? AND sent_at IS NULL AND dead_lettered_at IS NULL
+                """,
+                (now, now, event_id),
             )
             self._require_changed(cursor, event_id)
 
@@ -2109,7 +2357,9 @@ class ConsoleStore:
         for row in rows:
             item = dict(row)
             item["payload"] = json.loads(str(item.pop("payload_json")))
-            if item["sent_at"] is not None:
+            if item.get("telegram_skipped_at") is not None:
+                item["status"] = "skipped"
+            elif item["sent_at"] is not None:
                 item["status"] = "sent"
             elif item["dead_lettered_at"] is not None:
                 item["status"] = "dead"
@@ -2625,6 +2875,95 @@ class ConsoleStore:
         if config is None:  # pragma: no cover - insert/update and read use the same DB
             raise RuntimeError("Telegram config could not be saved")
         return config
+
+    def save_telegram_chat_candidates(
+        self,
+        candidates: Iterable[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized: dict[str, dict[str, str]] = {}
+        for candidate in candidates:
+            chat_id = str(candidate.get("id") or "").strip()
+            chat_type = str(candidate.get("type") or "").strip()
+            title = str(candidate.get("title") or "").strip()
+            if not chat_id or len(chat_id) > 64:
+                continue
+            if chat_type not in {"private", "group", "supergroup", "channel"}:
+                continue
+            normalized[chat_id] = {
+                "chat_id": chat_id,
+                "chat_type": chat_type,
+                "title": title[:100] or chat_id,
+            }
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            for candidate in normalized.values():
+                connection.execute(
+                    """
+                    INSERT INTO telegram_chat_candidates(
+                        chat_id, chat_type, title, discovered_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(chat_id) DO UPDATE SET
+                        chat_type = excluded.chat_type,
+                        title = excluded.title,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        candidate["chat_id"],
+                        candidate["chat_type"],
+                        candidate["title"],
+                        now,
+                        now,
+                    ),
+                )
+        return self.list_telegram_chat_candidates()
+
+    def list_telegram_chat_candidates(
+        self,
+        *,
+        private_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        where = "WHERE chat_type = 'private'" if private_only else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT chat_id, chat_type, title, discovered_at, updated_at
+                FROM telegram_chat_candidates
+                {where}
+                ORDER BY title COLLATE NOCASE, chat_id
+                """
+            ).fetchall()
+        return [
+            {
+                "id": str(row["chat_id"]),
+                "type": str(row["chat_type"]),
+                "title": str(row["title"]),
+            }
+            for row in rows
+        ]
+
+    def clear_telegram_chat_candidates(self) -> int:
+        now = _now()
+        with self._connection(immediate=True) as connection:
+            cursor = connection.execute("DELETE FROM telegram_chat_candidates")
+            connection.execute(
+                """
+                UPDATE watch_targets
+                SET telegram_enabled = 0, version = version + 1, updated_at = ?
+                WHERE telegram_enabled = 1
+                """,
+                (now,),
+            )
+            connection.execute(
+                """
+                UPDATE console_outbox
+                SET sent_at = ?, telegram_skipped_at = ?,
+                    next_attempt_at = NULL, last_error = NULL
+                WHERE sent_at IS NULL AND dead_lettered_at IS NULL
+                  AND telegram_chat_id IS NOT NULL
+                """,
+                (now, now),
+            )
+            return int(cursor.rowcount)
 
     def get_telegram_config(
         self,

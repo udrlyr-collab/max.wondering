@@ -88,6 +88,15 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
                 last_seen_at TEXT NOT NULL,
                 UNIQUE(target_id, screening_key)
             );
+            CREATE TABLE telegram_config (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                bot_token_ciphertext BLOB NOT NULL,
+                chat_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         connection.execute(
@@ -117,11 +126,31 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
             """,
             (1, "legacy-screening", "{}", now, now),
         )
+        connection.execute(
+            """
+            INSERT INTO telegram_config(
+                id, bot_token_ciphertext, chat_id, enabled,
+                version, created_at, updated_at
+            ) VALUES (1, ?, ?, 1, 1, ?, ?)
+            """,
+            (b"legacy-token", "599123456", now, now),
+        )
 
     store = ConsoleStore(database, Fernet.generate_key().decode("ascii"))
 
     assert store.list_targets()[0]["poll_jitter_seconds"] == 5
     assert store.list_targets()[0]["format_code"] == ""
+    assert store.list_targets()[0]["telegram_enabled"] is True
+    assert store.list_targets()[0]["telegram_chat_id"] == "599123456"
+    assert store.list_targets()[0]["telegram_notify_new"] is True
+    assert store.list_targets()[0]["telegram_notify_seat_increase"] is True
+    assert store.list_telegram_chat_candidates() == [
+        {
+            "id": "599123456",
+            "type": "legacy",
+            "title": "기존 Telegram 수신자",
+        }
+    ]
     existing = store.ensure_default_target(
         site_no="0013",
         site_name="Yongsan",
@@ -152,6 +181,8 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
         ).fetchone()
     assert columns["poll_jitter_seconds"][4] == "5"
     assert columns["format_code"][4] == "''"
+    assert columns["telegram_enabled"][4] == "0"
+    assert columns["telegram_chat_id"][4] == "''"
     assert "CHECK(poll_interval_seconds >= 5)" in target_schema
     assert "CHECK(poll_interval_seconds >= 30)" not in target_schema
     assert migrated_screening == (1, "legacy-screening")

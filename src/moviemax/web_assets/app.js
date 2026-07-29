@@ -7,6 +7,7 @@ const state = {
   activity: [],
   recentAlerts: [],
   telegram: {},
+  telegramUsers: [],
   webPush: {
     configured: false,
     public_key: "",
@@ -281,6 +282,14 @@ function telegramFeedback(message = "", kind = "info") {
   feedback.hidden = !message;
   feedback.textContent = message;
   feedback.className = `form-feedback is-${kind}`;
+  feedback.setAttribute("role", kind === "error" ? "alert" : "status");
+}
+
+function targetTelegramFeedback(id, message = "", kind = "info") {
+  const feedback = byId(id);
+  feedback.hidden = !message;
+  feedback.textContent = message;
+  feedback.className = `poll-settings-feedback is-${kind}`;
   feedback.setAttribute("role", kind === "error" ? "alert" : "status");
 }
 
@@ -590,6 +599,7 @@ function renderDashboard() {
   byId("notifyNew").checked = Boolean(target.notify_new);
   byId("autoTrackNew").checked = Boolean(target.auto_track_new);
   renderPollSettings(target);
+  renderTargetTelegramSettings();
 
   const open = state.screenings.filter((item) => item.control_yn !== "Y");
   const tracked = state.screenings.filter((item) => item.watched);
@@ -911,6 +921,7 @@ function deliveryStatus(item) {
   const sentAt = notification.sent_at || item.sent_at;
   const deadAt = notification.dead_lettered_at || item.dead_lettered_at;
   const status = notification.status || item.status;
+  if (status === "skipped") return "Telegram 미사용";
   if (sentAt) return "Telegram 발송 완료";
   if (deadAt) return "Telegram 발송 실패";
   if (Object.prototype.hasOwnProperty.call(item, "notification") && item.notification === null) return "기록만 저장";
@@ -1031,7 +1042,7 @@ function activityDetailsHtml(item) {
     ["감지 시각", humanDateTime(activityTimestamp(item))],
     ["상세 완전성", completeness],
     ["알림 상태", deliveryStatus(item)],
-    ["Telegram 발송", (notification.sent_at || item.sent_at) ? humanDateTime(notification.sent_at || item.sent_at) : "아직 없음"],
+    ["Telegram 처리", notification.status === "skipped" ? "대상 설정에서 사용 안 함" : (notification.sent_at || item.sent_at) ? humanDateTime(notification.sent_at || item.sent_at) : "아직 없음"],
     ["다음 시도", (notification.next_attempt_at || item.next_attempt_at) ? humanDateTime(notification.next_attempt_at || item.next_attempt_at) : "없음"],
     ["실패 확정", (notification.dead_lettered_at || item.dead_lettered_at) ? humanDateTime(notification.dead_lettered_at || item.dead_lettered_at) : "없음"],
     ["시도 횟수", notification.attempts ?? item.attempts ?? "—"],
@@ -1482,6 +1493,61 @@ function renderTelegram() {
   byId("testTelegram").title = active
     ? "현재 서버에 저장된 Telegram 설정으로 전송합니다"
     : "Telegram 설정을 저장하고 활성화한 뒤 사용할 수 있습니다";
+  renderTargetTelegramSettings();
+  renderCreateTelegramSettings();
+}
+
+function telegramUserOptions(selectedId = "") {
+  const selected = String(selectedId || "");
+  const users = Array.isArray(state.telegramUsers) ? [...state.telegramUsers] : [];
+  if (selected && !users.some((user) => String(user.id) === selected)) {
+    users.push({ id: selected, title: "기존 수신자", type: "legacy" });
+  }
+  const options = ['<option value="">사용자를 선택하세요</option>'];
+  for (const user of users) {
+    const id = String(user.id || "");
+    if (!id) continue;
+    const title = String(user.title || "Telegram 사용자");
+    options.push(`<option value="${escapeHtml(id)}" ${id === selected ? "selected" : ""}>${escapeHtml(title)} · ${escapeHtml(id)}</option>`);
+  }
+  return options.join("");
+}
+
+function renderTargetTelegramSettings() {
+  const target = selectedTarget();
+  if (!target) return;
+  const configured = Boolean(state.telegram.configured);
+  const enabled = Boolean(target.telegram_enabled);
+  const toggle = byId("targetTelegramEnabled");
+  const fields = byId("targetTelegramFields");
+  const select = byId("targetTelegramUser");
+  toggle.checked = enabled;
+  toggle.disabled = !configured;
+  toggle.title = configured ? "" : "먼저 Telegram 봇을 연결하세요";
+  fields.hidden = !enabled;
+  select.innerHTML = telegramUserOptions(target.telegram_chat_id);
+  select.required = enabled;
+  byId("targetTelegramNotifyNew").checked = Boolean(target.telegram_notify_new);
+  byId("targetTelegramNotifySeats").checked = Boolean(target.telegram_notify_seat_increase);
+  byId("refreshTargetTelegramUsers").disabled = !configured;
+  byId("saveTargetTelegram").disabled = !configured || (enabled && !select.value);
+}
+
+function renderCreateTelegramSettings() {
+  const configured = Boolean(state.telegram.configured);
+  const enabled = byId("createTelegramEnabled").checked;
+  const fields = byId("createTelegramFields");
+  const select = byId("createTelegramUser");
+  byId("createTelegramEnabled").disabled = !configured;
+  byId("createTelegramEnabled").title = configured ? "" : "먼저 Telegram 봇을 연결하세요";
+  fields.hidden = !enabled;
+  const selected = select.value;
+  select.innerHTML = telegramUserOptions(selected);
+  select.required = enabled;
+  byId("refreshCreateTelegramUsers").disabled = !configured;
+  if (!configured) {
+    targetTelegramFeedback("createTelegramFeedback", "Telegram 봇을 먼저 연결하면 대상별 수신자를 선택할 수 있습니다.", "info");
+  }
 }
 
 const webPushDisabledStorageKey = "moviemax.webPush.disabled";
@@ -1956,6 +2022,7 @@ async function loadBootstrap({ preserveSelection = true } = {}) {
       ? data.activity
       : Array.isArray(data.activity?.items) ? data.activity.items : [];
     state.telegram = recordOrEmpty(data.telegram);
+    state.telegramUsers = Array.isArray(data.telegram_users) ? data.telegram_users : [];
     Object.assign(state.webPush, recordOrEmpty(data.web_push));
     reconcileRefreshRequest();
     if (!preserveSelection || !state.targets.some((item) => item.id === state.selectedTargetId)) {
@@ -2317,6 +2384,12 @@ async function refreshCurrent() {
 }
 
 async function openTargetDialog() {
+  byId("createTelegramEnabled").checked = false;
+  byId("createTelegramNotifyNew").checked = true;
+  byId("createTelegramNotifySeats").checked = true;
+  byId("createTelegramUser").innerHTML = telegramUserOptions();
+  targetTelegramFeedback("createTelegramFeedback");
+  renderCreateTelegramSettings();
   showDialog(byId("targetDialog"), byId("siteSelect"));
   if (state.catalog) return;
   try {
@@ -2447,6 +2520,13 @@ async function createTarget(event) {
   const selection = targetSelection();
   if (!selection) return;
   const { siteOption, movieOption, format } = selection;
+  const telegramEnabled = byId("createTelegramEnabled").checked;
+  const telegramChatId = byId("createTelegramUser").value;
+  if (telegramEnabled && !telegramChatId) {
+    targetTelegramFeedback("createTelegramFeedback", "Telegram 수신자를 선택하세요.", "error");
+    byId("createTelegramUser").focus();
+    return;
+  }
   const createButton = byId("createTarget");
   setButtonBusy(createButton, true);
   try {
@@ -2459,6 +2539,10 @@ async function createTarget(event) {
         movie_name: movieOption.dataset.movieName,
         format_code: String(format.format_code),
         format_name: String(format.format_name),
+        telegram_enabled: telegramEnabled,
+        telegram_chat_id: telegramEnabled ? telegramChatId : null,
+        telegram_notify_new: byId("createTelegramNotifyNew").checked,
+        telegram_notify_seat_increase: byId("createTelegramNotifySeats").checked,
       },
     });
     byId("targetDialog").close();
@@ -2468,6 +2552,64 @@ async function createTarget(event) {
   } finally {
     createButton.setAttribute("aria-busy", "false");
     createButton.disabled = !targetSelection();
+  }
+}
+
+async function saveTargetTelegram(event) {
+  event.preventDefault();
+  const target = selectedTarget();
+  if (!target) return;
+  const enabled = byId("targetTelegramEnabled").checked;
+  const chatId = byId("targetTelegramUser").value;
+  if (enabled && !chatId) {
+    targetTelegramFeedback("targetTelegramFeedback", "Telegram 수신자를 선택하세요.", "error");
+    byId("targetTelegramUser").focus();
+    return;
+  }
+  const button = byId("saveTargetTelegram");
+  setButtonBusy(button, true);
+  targetTelegramFeedback("targetTelegramFeedback", "대상별 Telegram 설정을 저장하고 있습니다.", "pending");
+  try {
+    await api(`/api/v1/targets/${target.id}`, {
+      method: "PATCH",
+      body: {
+        version: target.version,
+        telegram_enabled: enabled,
+        telegram_chat_id: chatId || target.telegram_chat_id || null,
+        telegram_notify_new: byId("targetTelegramNotifyNew").checked,
+        telegram_notify_seat_increase: byId("targetTelegramNotifySeats").checked,
+      },
+    });
+    await loadBootstrap();
+    targetTelegramFeedback("targetTelegramFeedback", enabled ? "선택한 사용자에게 대상별 알림을 보냅니다." : "이 대상의 Telegram 알림을 껐습니다.", "success");
+    showToast("대상별 Telegram 설정을 저장했습니다.");
+  } catch (error) {
+    renderTargetTelegramSettings();
+    targetTelegramFeedback("targetTelegramFeedback", `저장하지 못했습니다. ${errorMessage(error)}`, "error");
+  } finally {
+    setButtonBusy(button, false);
+  }
+}
+
+async function refreshTargetTelegramUsers(buttonId, feedbackId) {
+  const button = byId(buttonId);
+  if (button.disabled) return;
+  const originalLabel = button.textContent;
+  setButtonBusy(button, true);
+  button.textContent = "불러오는 중…";
+  targetTelegramFeedback(feedbackId, "봇에 /start를 보낸 사용자를 확인하고 있습니다.", "pending");
+  try {
+    const data = await api("/api/v1/telegram/chats", { method: "POST", body: {} });
+    state.telegramUsers = Array.isArray(data.users) ? data.users : [];
+    renderTargetTelegramSettings();
+    renderCreateTelegramSettings();
+    const count = state.telegramUsers.length;
+    targetTelegramFeedback(feedbackId, count ? `${count}명의 사용자를 불러왔습니다.` : "사용자를 찾지 못했습니다. 봇에게 /start를 보낸 뒤 다시 시도하세요.", count ? "success" : "info");
+  } catch (error) {
+    targetTelegramFeedback(feedbackId, `사용자를 불러오지 못했습니다. ${errorMessage(error)}`, "error");
+  } finally {
+    setButtonBusy(button, false);
+    button.textContent = originalLabel;
   }
 }
 
@@ -2567,6 +2709,9 @@ async function loadChats() {
       body: token ? { bot_token: token } : {},
     });
     const chats = data.chats || [];
+    state.telegramUsers = Array.isArray(data.users) ? data.users : [];
+    renderTargetTelegramSettings();
+    renderCreateTelegramSettings();
     byId("chatCandidates").innerHTML = chats.length
       ? chats.map((chat) => `<button class="chat-option" data-chat-id="${escapeHtml(chat.id)}" type="button" aria-pressed="false" aria-label="${escapeHtml(chat.title || chat.type || "채팅")} ${escapeHtml(chat.id)} 선택"><span>${escapeHtml(chat.title || chat.type || "채팅")}</span><strong>${escapeHtml(chat.id)}</strong></button>`).join("")
       : '<p class="security-note">채팅이 없습니다. 봇에게 /start를 보낸 뒤 다시 시도하세요.</p>';
@@ -2716,10 +2861,31 @@ byId("refreshNow").addEventListener("click", () => refreshCurrent().catch(report
 byId("targetEnabled").addEventListener("change", (event) => patchTarget({ enabled: event.target.checked }).catch(reportError));
 byId("notifyNew").addEventListener("change", (event) => patchTarget({ notify_new: event.target.checked }).catch(reportError));
 byId("autoTrackNew").addEventListener("change", (event) => patchTarget({ auto_track_new: event.target.checked }).catch(reportError));
+byId("targetTelegramEnabled").addEventListener("change", () => {
+  byId("targetTelegramFields").hidden = !byId("targetTelegramEnabled").checked;
+  byId("targetTelegramUser").required = byId("targetTelegramEnabled").checked;
+  byId("saveTargetTelegram").disabled = byId("targetTelegramEnabled").checked && !byId("targetTelegramUser").value;
+  targetTelegramFeedback("targetTelegramFeedback", "변경사항이 아직 저장되지 않았습니다.", "info");
+});
+byId("targetTelegramUser").addEventListener("change", () => {
+  byId("saveTargetTelegram").disabled = byId("targetTelegramEnabled").checked && !byId("targetTelegramUser").value;
+  targetTelegramFeedback("targetTelegramFeedback", "변경사항이 아직 저장되지 않았습니다.", "info");
+});
+[byId("targetTelegramNotifyNew"), byId("targetTelegramNotifySeats")].forEach((input) => {
+  input.addEventListener("change", () => targetTelegramFeedback("targetTelegramFeedback", "변경사항이 아직 저장되지 않았습니다.", "info"));
+});
+byId("targetTelegramForm").addEventListener("submit", (event) => saveTargetTelegram(event).catch(reportError));
+byId("refreshTargetTelegramUsers").addEventListener("click", () => refreshTargetTelegramUsers("refreshTargetTelegramUsers", "targetTelegramFeedback").catch(reportError));
 byId("siteSelect").addEventListener("change", (event) => loadMovies(event.target.value).catch(reportError));
 byId("movieSelect").addEventListener("change", (event) => loadFormats(event.target.value));
 byId("formatSelect").addEventListener("change", updateSelectionPreview);
 byId("targetForm").addEventListener("submit", (event) => createTarget(event).catch(reportError));
+byId("createTelegramEnabled").addEventListener("change", () => {
+  renderCreateTelegramSettings();
+  targetTelegramFeedback("createTelegramFeedback", byId("createTelegramEnabled").checked ? "수신자와 알림 종류를 선택하세요." : "Telegram 알림을 사용하지 않습니다.", "info");
+});
+byId("createTelegramUser").addEventListener("change", () => targetTelegramFeedback("createTelegramFeedback", "선택한 사용자에게만 알림을 보냅니다.", "info"));
+byId("refreshCreateTelegramUsers").addEventListener("click", () => refreshTargetTelegramUsers("refreshCreateTelegramUsers", "createTelegramFeedback").catch(reportError));
 byId("deleteTargetForm").addEventListener("submit", (event) => deleteCurrentTarget(event).catch(reportError));
 byId("bulkThresholdForm").addEventListener("submit", (event) => applyBulkThreshold(event).catch(reportError));
 byId("pollSettingsForm").addEventListener("submit", (event) => savePollSettings(event).catch(reportError));

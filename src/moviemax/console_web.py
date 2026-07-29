@@ -16,7 +16,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from moviemax.cgv import CgvClient, CgvError
@@ -77,6 +77,10 @@ class TargetCreate(StrictModel):
         ge=0,
         le=MAX_POLL_JITTER_SECONDS,
     )
+    telegram_enabled: bool = False
+    telegram_chat_id: str | None = Field(default=None, max_length=64)
+    telegram_notify_new: bool = True
+    telegram_notify_seat_increase: bool = True
 
     @field_validator("site_no")
     @classmethod
@@ -98,6 +102,18 @@ class TargetCreate(StrictModel):
     def validate_movie_name(cls, value: str) -> str:
         return _display_name(value, "영화 또는 포맷 이름")
 
+    @field_validator("telegram_chat_id")
+    @classmethod
+    def strip_telegram_chat_id(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
+
+    @model_validator(mode="after")
+    def require_telegram_user(self) -> TargetCreate:
+        if self.telegram_enabled and not self.telegram_chat_id:
+            raise ValueError("Telegram을 사용하려면 수신자를 선택하세요")
+        return self
+
 
 class TargetUpdate(StrictModel):
     version: int = Field(ge=1)
@@ -114,6 +130,16 @@ class TargetUpdate(StrictModel):
         ge=0,
         le=MAX_POLL_JITTER_SECONDS,
     )
+    telegram_enabled: bool | None = None
+    telegram_chat_id: str | None = Field(default=None, max_length=64)
+    telegram_notify_new: bool | None = None
+    telegram_notify_seat_increase: bool | None = None
+
+    @field_validator("telegram_chat_id")
+    @classmethod
+    def strip_telegram_chat_id(cls, value: str | None) -> str | None:
+        normalized = value.strip() if value is not None else ""
+        return normalized or None
 
 
 class TargetDelete(StrictModel):
@@ -434,6 +460,7 @@ def create_app(
             "targets": database.list_targets(),
             "activity": database.list_activity_page(limit=50)["items"],
             "telegram": _telegram_public(database),
+            "telegram_users": database.list_telegram_chat_candidates(private_only=True),
             "web_push": database.web_push_status(),
             "status": _worker_status(database),
         }
@@ -520,6 +547,10 @@ def create_app(
                 enabled=True,
                 notify_new=True,
                 auto_track_new=False,
+                telegram_enabled=payload.telegram_enabled,
+                telegram_chat_id=payload.telegram_chat_id or "",
+                telegram_notify_new=payload.telegram_notify_new,
+                telegram_notify_seat_increase=(payload.telegram_notify_seat_increase),
                 poll_interval_seconds=(
                     payload.poll_interval_seconds
                     if payload.poll_interval_seconds is not None
@@ -548,6 +579,8 @@ def create_app(
             raise HTTPException(
                 status.HTTP_404_NOT_FOUND, "감시 대상을 찾을 수 없습니다"
             ) from exc
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
         return {"target": target}
 
     @app.delete("/api/v1/targets/{target_id}")
@@ -697,13 +730,17 @@ def create_app(
 
     @app.put("/api/v1/telegram")
     def save_telegram(payload: TelegramUpdate) -> dict[str, Any]:
+        previous_bot_id = database.get_metadata("telegram_bot_id")
+        previous_username = database.get_metadata("telegram_bot_username")
         username: str | None = None
+        bot_id: str | None = None
         if payload.bot_token:
             info = TelegramClient(
                 payload.bot_token,
                 timeout=base_settings.request_timeout_seconds,
             ).bot_info()
             username = info["username"]
+            bot_id = info["id"]
         try:
             database.save_telegram_config(
                 bot_token=payload.bot_token,
@@ -713,6 +750,18 @@ def create_app(
             )
         except ValueError as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+        if bot_id is not None:
+            bot_changed = (
+                previous_bot_id is not None and previous_bot_id != bot_id
+            ) or (
+                previous_bot_id is None
+                and previous_username is not None
+                and username is not None
+                and previous_username != username
+            )
+            if bot_changed:
+                database.clear_telegram_chat_candidates()
+            database.set_metadata("telegram_bot_id", bot_id)
         if username is not None:
             database.set_metadata("telegram_bot_username", username)
         return {"telegram": _telegram_public(database)}
@@ -726,7 +775,11 @@ def create_app(
             token,
             timeout=base_settings.request_timeout_seconds,
         )
-        return {"chats": client.chat_candidates()}
+        chats = database.save_telegram_chat_candidates(client.chat_candidates())
+        return {
+            "chats": chats,
+            "users": [chat for chat in chats if chat["type"] == "private"],
+        }
 
     @app.post("/api/v1/telegram/test")
     def telegram_test() -> dict[str, bool]:

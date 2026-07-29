@@ -75,7 +75,7 @@ class FakeTelegramClient:
         return {"id": "777", "username": "moviemax_test_bot", "name": "MovieMax"}
 
     def chat_candidates(self) -> list[dict[str, str]]:
-        return [{"id": "-100123", "type": "group", "title": "MovieMax 알림"}]
+        return [{"id": "599123456", "type": "private", "title": "홍성민"}]
 
     def send_message(self, message: str) -> None:
         self.sent_messages.append((self.token, self.chat_id, message))
@@ -193,6 +193,10 @@ def test_catalog_and_target_create_read_update_refresh(console_context) -> None:
     created = created_response.json()["target"]
     assert created["notify_new"] is True
     assert created["auto_track_new"] is False
+    assert created["telegram_enabled"] is False
+    assert created["telegram_chat_id"] == ""
+    assert created["telegram_notify_new"] is True
+    assert created["telegram_notify_seat_increase"] is True
     assert created["format_code"] == "48"
     assert created["format_keyword"] == "IMAX LASER 2D"
 
@@ -347,14 +351,101 @@ def test_telegram_token_never_appears_in_console_responses(
     )
     assert chats.status_code == 200
     assert chats.json()["chats"] == [
-        {"id": "-100123", "type": "group", "title": "MovieMax 알림"}
+        {"id": "599123456", "type": "private", "title": "홍성민"}
     ]
+    assert chats.json()["users"] == chats.json()["chats"]
     assert token not in chats.text
 
     sent = client.post("/api/v1/telegram/test", headers=headers)
     assert sent.status_code == 200
     assert sent.json() == {"sent": True}
     assert FakeTelegramClient.sent_messages[0][0:2] == (token, "-100123")
+
+
+def test_target_telegram_requires_registered_private_user_and_saves_options(
+    console_context,
+    monkeypatch,
+) -> None:
+    settings, _store, _catalog, client = console_context
+    monkeypatch.setattr("moviemax.console_web.TelegramClient", FakeTelegramClient)
+    headers = mutation_headers(settings)
+    token = "1234567890:super-secret-console-token"
+    saved = client.put(
+        "/api/v1/telegram",
+        json={"bot_token": token, "chat_id": "599123456", "enabled": True},
+        headers=headers,
+    )
+    assert saved.status_code == 200
+
+    missing_user = client.post(
+        "/api/v1/targets",
+        json={
+            **target_payload(),
+            "telegram_enabled": True,
+            "telegram_chat_id": "599123456",
+        },
+        headers=headers,
+    )
+    assert missing_user.status_code == 409
+    assert "not registered" in missing_user.json()["detail"]
+
+    refreshed = client.post(
+        "/api/v1/telegram/chats",
+        json={},
+        headers=headers,
+    )
+    assert refreshed.status_code == 200
+    assert refreshed.json()["users"] == [
+        {"id": "599123456", "type": "private", "title": "홍성민"}
+    ]
+
+    created_response = client.post(
+        "/api/v1/targets",
+        json={
+            **target_payload(),
+            "telegram_enabled": True,
+            "telegram_chat_id": "599123456",
+            "telegram_notify_new": False,
+            "telegram_notify_seat_increase": True,
+        },
+        headers=headers,
+    )
+    assert created_response.status_code == 201
+    created = created_response.json()["target"]
+    assert created["telegram_enabled"] is True
+    assert created["telegram_chat_id"] == "599123456"
+    assert created["telegram_notify_new"] is False
+    assert created["telegram_notify_seat_increase"] is True
+
+    bootstrap = client.get("/api/v1/bootstrap").json()
+    assert bootstrap["telegram_users"] == refreshed.json()["users"]
+
+    updated_response = client.patch(
+        f"/api/v1/targets/{created['id']}",
+        json={
+            "version": created["version"],
+            "telegram_enabled": True,
+            "telegram_chat_id": "599123456",
+            "telegram_notify_new": True,
+            "telegram_notify_seat_increase": False,
+        },
+        headers=headers,
+    )
+    assert updated_response.status_code == 200
+    updated = updated_response.json()["target"]
+    assert updated["telegram_notify_new"] is True
+    assert updated["telegram_notify_seat_increase"] is False
+
+    missing_selection = client.post(
+        "/api/v1/targets",
+        json={
+            **target_payload(),
+            "movie_no": "different-movie",
+            "telegram_enabled": True,
+        },
+        headers=headers,
+    )
+    assert missing_selection.status_code == 422
 
 
 def test_telegram_rejects_empty_chat_before_contacting_bot(
@@ -444,6 +535,11 @@ def test_console_serves_modernist_assets_without_secrets(console_context) -> Non
     assert 'id="pollJitter" type="number" min="0" max="300"' in page.text
     assert re.search(r'id="chatId"[^>]*\brequired\b', page.text)
     assert 'id="telegramFeedback"' in page.text
+    assert 'id="createTelegramEnabled"' in page.text
+    assert 'id="createTelegramUser"' in page.text
+    assert 'id="targetTelegramForm"' in page.text
+    assert 'id="targetTelegramNotifyNew"' in page.text
+    assert 'id="targetTelegramNotifySeats"' in page.text
     assert 'content="light"' in page.text
     assert "@font-face" in stylesheet.text
     assert (

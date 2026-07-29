@@ -151,21 +151,28 @@ class ConsoleWorker:
         return config
 
     def deliver_pending(self) -> tuple[int, int, int]:
+        events = self.store.pending_events()
+        for event in events:
+            if event.telegram_chat_id:
+                continue
+            try:
+                self.store.mark_telegram_skipped(event.id)
+            except KeyError:
+                continue
+
         config = self._telegram_config()
         if config is None:
             return 0, 0, 0
 
-        client = TelegramClient(
-            str(config["bot_token"]),
-            str(config["chat_id"]),
-            self.base_settings.request_timeout_seconds,
-        )
         config_version = int(config["version"])
+        clients: dict[str, TelegramClient] = {}
         sent = 0
         failed = 0
         dead = 0
 
-        for event in self.store.pending_events():
+        for event in events:
+            if not event.telegram_chat_id:
+                continue
             if not self.store.is_outbox_event_pending(event.id):
                 continue
             latest = self._telegram_config()
@@ -174,11 +181,19 @@ class ConsoleWorker:
             if int(latest["version"]) != config_version:
                 config = latest
                 config_version = int(config["version"])
+                clients.clear()
+
+            chat_id = event.telegram_chat_id
+            if not chat_id:
+                continue
+            client = clients.get(chat_id)
+            if client is None:
                 client = TelegramClient(
                     str(config["bot_token"]),
-                    str(config["chat_id"]),
+                    chat_id,
                     self.base_settings.request_timeout_seconds,
                 )
+                clients[chat_id] = client
 
             try:
                 messages = render_event_messages(event)

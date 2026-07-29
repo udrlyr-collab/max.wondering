@@ -991,6 +991,133 @@ a:focus-visible {
   }
 }
 
+.target-telegram-settings,
+.create-telegram-settings {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--surface);
+}
+
+.target-telegram-settings {
+  padding: 14px;
+}
+
+.target-telegram-heading,
+.target-telegram-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.target-telegram-heading strong,
+.create-telegram-settings legend {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.target-telegram-heading small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.compact-switch {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height);
+}
+
+.compact-switch > input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.target-telegram-fields {
+  display: grid;
+  gap: 11px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.target-telegram-fields[hidden] {
+  display: none;
+}
+
+.target-telegram-fields > label > span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.target-telegram-fields select {
+  width: 100%;
+  height: var(--control-height);
+}
+
+.telegram-event-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.telegram-event-options label {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-height);
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  background: var(--surface-subtle);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.telegram-event-options input {
+  margin: 0 8px 0 0;
+}
+
+.target-telegram-actions .button,
+.target-user-refresh {
+  min-height: var(--control-height);
+}
+
+.create-telegram-settings {
+  min-width: 0;
+  margin: 16px 0 0;
+  padding: 14px;
+}
+
+.create-telegram-settings legend {
+  padding: 0 5px;
+}
+
+.compact-create-switch {
+  margin: 0;
+  border: 0;
+}
+
+@media (max-width: 560px) {
+  .telegram-event-options {
+    grid-template-columns: 1fr;
+  }
+
+  .target-telegram-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .target-telegram-actions > * {
+    width: 100%;
+  }
+}
+
 @media (max-width: 520px) {
   .metric-strip {
     grid-template-columns: 1fr;

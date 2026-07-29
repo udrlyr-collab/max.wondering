@@ -92,6 +92,29 @@ def worker_context(tmp_path):
     return settings, base_settings, store, worker
 
 
+def enable_target_telegram(
+    store: ConsoleStore,
+    target: dict[str, Any],
+    *,
+    token: str = "1234567890:worker-secret-token",
+    chat_id: str = "599123456",
+    notify_new: bool = True,
+    notify_seats: bool = True,
+) -> dict[str, Any]:
+    store.save_telegram_config(bot_token=token, chat_id=chat_id)
+    store.save_telegram_chat_candidates(
+        [{"id": chat_id, "type": "private", "title": "테스트 사용자"}]
+    )
+    return store.update_target(
+        target["id"],
+        expected_version=target["version"],
+        telegram_enabled=True,
+        telegram_chat_id=chat_id,
+        telegram_notify_new=notify_new,
+        telegram_notify_seat_increase=notify_seats,
+    )
+
+
 def test_fetch_target_uses_target_specific_cgv_client(
     worker_context,
     monkeypatch,
@@ -137,6 +160,8 @@ def test_worker_polling_creates_and_delivers_outbox_without_network(
 ) -> None:
     _settings, _base, store, worker = worker_context
     target = store.ensure_default_target(auto_track_new=True, notify_new=True)
+    token = "1234567890:worker-secret-token"
+    target = enable_target_telegram(store, target, token=token)
     snapshots = [
         [screening(free_seats=0)],
         [screening(free_seats=0), screening(sequence="2", free_seats=8)],
@@ -160,8 +185,6 @@ def test_worker_polling_creates_and_delivers_outbox_without_network(
     assert store.pending_events()[0].kind == "new_screenings"
     assert store.list_screenings(target["id"])[1]["watched"] is True
 
-    token = "1234567890:worker-secret-token"
-    store.save_telegram_config(bot_token=token, chat_id="-100123")
     FakeTelegramSender.sent.clear()
     FakeTelegramSender.error = None
     monkeypatch.setattr(
@@ -171,10 +194,57 @@ def test_worker_polling_creates_and_delivers_outbox_without_network(
 
     assert worker.deliver_pending() == (1, 0, 0)
     assert len(FakeTelegramSender.sent) == 1
-    assert FakeTelegramSender.sent[0][0:2] == (token, "-100123")
+    assert FakeTelegramSender.sent[0][0:2] == (token, "599123456")
     assert "새 예매 회차" in FakeTelegramSender.sent[0][2]
     assert store.pending_events() == []
     assert store.list_outbox(status="sent")[0]["status"] == "sent"
+
+
+def test_target_telegram_options_route_only_selected_event_kinds(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    target = store.ensure_default_target(auto_track_new=False, notify_new=True)
+    target = enable_target_telegram(
+        store,
+        target,
+        chat_id="599777888",
+        notify_new=False,
+        notify_seats=True,
+    )
+    baseline = screening(free_seats=1)
+    store.apply_snapshot(target["id"], target["version"], [baseline])
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [baseline, screening(sequence="2", free_seats=4)],
+    )
+
+    FakeTelegramSender.sent.clear()
+    FakeTelegramSender.error = None
+    monkeypatch.setattr(
+        "moviemax.console_worker.TelegramClient",
+        FakeTelegramSender,
+    )
+    assert worker.deliver_pending() == (0, 0, 0)
+    assert FakeTelegramSender.sent == []
+    assert store.list_outbox(status="sent")[0]["status"] == "skipped"
+
+    screening_id = store.list_screenings(target["id"])[0]["id"]
+    store.set_watch(screening_id, True)
+    store.apply_snapshot(
+        target["id"],
+        target["version"],
+        [replace(baseline, free_seats=3), screening(sequence="2", free_seats=4)],
+    )
+
+    assert worker.deliver_pending() == (1, 0, 0)
+    assert FakeTelegramSender.sent[0][0:2] == (
+        "1234567890:worker-secret-token",
+        "599777888",
+    )
+    assert "잔여석 증가" in FakeTelegramSender.sent[0][2]
 
 
 def test_worker_poll_failure_is_backed_off_and_isolated(
@@ -223,15 +293,12 @@ def test_worker_retryable_telegram_failure_stays_pending(
 ) -> None:
     _settings, _base, store, worker = worker_context
     target = store.ensure_default_target()
+    target = enable_target_telegram(store, target)
     store.apply_snapshot(target["id"], target["version"], [screening()])
     store.apply_snapshot(
         target["id"],
         target["version"],
         [screening(), screening(sequence="2", free_seats=5)],
-    )
-    store.save_telegram_config(
-        bot_token="1234567890:worker-secret-token",
-        chat_id="-100123",
     )
     FakeTelegramSender.sent.clear()
     FakeTelegramSender.error = TelegramError(
@@ -258,15 +325,12 @@ def test_worker_permanent_telegram_failure_is_dead_lettered(
 ) -> None:
     settings, _base, store, worker = worker_context
     target = store.ensure_default_target()
+    target = enable_target_telegram(store, target)
     store.apply_snapshot(target["id"], target["version"], [screening()])
     store.apply_snapshot(
         target["id"],
         target["version"],
         [screening(), screening(sequence="2", free_seats=5)],
-    )
-    store.save_telegram_config(
-        bot_token="1234567890:worker-secret-token",
-        chat_id="-100123",
     )
     FakeTelegramSender.error = TelegramError("forbidden", retryable=False)
     monkeypatch.setattr(
@@ -339,7 +403,8 @@ def test_web_push_delivers_without_telegram_and_keeps_channel_state_separate(
     assert payload["title"] == "잔여석 +2 · 오디세이"
     assert payload["url"].startswith("https://max.wondering.kr/booking?url=")
     assert len(store.list_web_push_deliveries(status="sent")) == 1
-    assert len(store.pending_events()) == 1
+    assert store.pending_events() == []
+    assert store.list_outbox(status="sent")[0]["status"] == "skipped"
 
 
 def test_expired_web_push_subscription_is_removed_without_dead_letter(
@@ -541,6 +606,7 @@ def test_target_delete_waits_for_in_flight_telegram_dispatch(
 ) -> None:
     _settings, _base, store, worker = worker_context
     target = store.ensure_default_target(auto_track_new=False)
+    target = enable_target_telegram(store, target)
     original = screening(free_seats=1)
     store.apply_snapshot(target["id"], target["version"], [original])
     screening_id = store.list_screenings(target["id"])[0]["id"]
@@ -549,10 +615,6 @@ def test_target_delete_waits_for_in_flight_telegram_dispatch(
         target["id"],
         target["version"],
         [replace(original, free_seats=2)],
-    )
-    store.save_telegram_config(
-        bot_token="1234567890:worker-secret-token",
-        chat_id="-100123",
     )
 
     send_started = threading.Event()
