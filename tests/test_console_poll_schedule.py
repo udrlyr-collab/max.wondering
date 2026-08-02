@@ -185,7 +185,18 @@ def test_existing_database_migrates_poll_jitter_with_default(tmp_path) -> None:
     assert columns["telegram_chat_id"][4] == "''"
     assert "CHECK(poll_interval_seconds >= 5)" in target_schema
     assert "CHECK(poll_interval_seconds >= 30)" not in target_schema
+    assert "UNIQUE(" not in target_schema
     assert migrated_screening == (1, "legacy-screening")
+
+    duplicate = store.create_target(
+        site_no="0013",
+        site_name="Yongsan",
+        movie_no="movie-1",
+        movie_name="Odyssey",
+        format_keyword="IMAX",
+        screen_grade_code="0301",
+    )
+    assert duplicate["id"] != existing["id"]
 
     first_format = store.create_target(
         site_no="0013",

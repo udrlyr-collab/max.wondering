@@ -190,11 +190,7 @@ class ConsoleStore:
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(
-                        company_code, site_no, movie_no,
-                        format_code, format_keyword, screen_grade_code
-                    )
+                    updated_at TEXT NOT NULL
                 );
 
                 CREATE TABLE IF NOT EXISTS console_screenings (
@@ -482,10 +478,10 @@ class ConsoleStore:
                 """
             )
             self._ensure_web_push_vapid(connection)
-        self._migrate_poll_interval_floor()
+        self._migrate_target_table_constraints()
 
-    def _migrate_poll_interval_floor(self) -> None:
-        """Rebuild legacy target tables whose interval CHECK still starts at 30."""
+    def _migrate_target_table_constraints(self) -> None:
+        """Rebuild target tables with legacy polling or uniqueness constraints."""
         connection = self._connect()
         try:
             row = connection.execute(
@@ -495,14 +491,16 @@ class ConsoleStore:
             if row is None:
                 raise RuntimeError("watch_targets table is missing")
             definition = re.sub(r"\s+", "", str(row["sql"] or "")).lower()
-            if "check(poll_interval_seconds>=30)" not in definition:
+            legacy_poll_floor = "check(poll_interval_seconds>=30)" in definition
+            equivalent_targets_are_unique = "unique(" in definition
+            if not legacy_poll_floor and not equivalent_targets_are_unique:
                 return
 
             connection.execute("PRAGMA foreign_keys=OFF")
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 """
-                CREATE TABLE watch_targets_poll_floor_v2 (
+                CREATE TABLE watch_targets_constraints_v3 (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     company_code TEXT NOT NULL,
                     site_no TEXT NOT NULL,
@@ -539,11 +537,7 @@ class ConsoleStore:
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    UNIQUE(
-                        company_code, site_no, movie_no,
-                        format_code, format_keyword, screen_grade_code
-                    )
+                    updated_at TEXT NOT NULL
                 )
                 """
             )
@@ -559,21 +553,22 @@ class ConsoleStore:
                 "created_at, updated_at"
             )
             connection.execute(
-                f"INSERT INTO watch_targets_poll_floor_v2({columns}) "
+                f"INSERT INTO watch_targets_constraints_v3({columns}) "
                 f"SELECT {columns} FROM watch_targets"
             )
             connection.execute("DROP TABLE watch_targets")
             connection.execute(
-                "ALTER TABLE watch_targets_poll_floor_v2 RENAME TO watch_targets"
+                "ALTER TABLE watch_targets_constraints_v3 RENAME TO watch_targets"
             )
             connection.execute(
                 "CREATE INDEX idx_watch_targets_due "
                 "ON watch_targets(enabled, next_poll_at, id)"
             )
+            connection.execute("PRAGMA optimize")
             violations = connection.execute("PRAGMA foreign_key_check").fetchall()
             if violations:
                 raise RuntimeError(
-                    "poll interval migration created foreign-key violations"
+                    "target constraint migration created foreign-key violations"
                 )
             connection.commit()
         except Exception:
@@ -675,10 +670,8 @@ class ConsoleStore:
             ),
         }
         if result["format_code"] and not result["screen_grade_code"]:
-            # Older databases still have a UNIQUE constraint that ends with
-            # screen_grade_code. Mirroring the exact format code here lets two
-            # otherwise equally named formats coexist without rebuilding the
-            # parent table and its foreign-key children.
+            # Keep the legacy screen-grade fallback aligned with the exact
+            # format code used by the CGV catalog.
             result["screen_grade_code"] = result["format_code"]
         required = ("company_code", "site_no", "site_name", "movie_no", "movie_name")
         if any(not result[field] for field in required):
@@ -731,14 +724,11 @@ class ConsoleStore:
     def _insert_target(
         connection: sqlite3.Connection,
         values: Mapping[str, Any],
-        *,
-        ignore_conflict: bool = False,
-    ) -> int | None:
+    ) -> int:
         now = _now()
-        action = "INSERT OR IGNORE" if ignore_conflict else "INSERT"
         cursor = connection.execute(
-            f"""
-            {action} INTO watch_targets(
+            """
+            INSERT INTO watch_targets(
                 company_code, site_no, site_name, movie_no, movie_name,
                 format_code, format_keyword, screen_grade_code, enabled, notify_new,
                 auto_track_new, telegram_enabled, telegram_chat_id,
@@ -793,25 +783,26 @@ class ConsoleStore:
         values = self._target_values(defaults)
         with self._connection(immediate=True) as connection:
             self._validate_target_telegram(connection, values)
-            target_id = self._insert_target(connection, values, ignore_conflict=True)
-            if target_id is None:
-                row = connection.execute(
-                    """
-                    SELECT * FROM watch_targets
-                    WHERE company_code = ? AND site_no = ? AND movie_no = ?
-                      AND format_code = ? AND format_keyword = ?
-                      AND screen_grade_code = ?
-                    """,
-                    (
-                        values["company_code"],
-                        values["site_no"],
-                        values["movie_no"],
-                        values["format_code"],
-                        values["format_keyword"],
-                        values["screen_grade_code"],
-                    ),
-                ).fetchone()
-            else:
+            row = connection.execute(
+                """
+                SELECT * FROM watch_targets
+                WHERE company_code = ? AND site_no = ? AND movie_no = ?
+                  AND format_code = ? AND format_keyword = ?
+                  AND screen_grade_code = ?
+                ORDER BY id
+                LIMIT 1
+                """,
+                (
+                    values["company_code"],
+                    values["site_no"],
+                    values["movie_no"],
+                    values["format_code"],
+                    values["format_keyword"],
+                    values["screen_grade_code"],
+                ),
+            ).fetchone()
+            if row is None:
+                target_id = self._insert_target(connection, values)
                 row = connection.execute(
                     "SELECT * FROM watch_targets WHERE id = ?",
                     (target_id,),
@@ -828,33 +819,13 @@ class ConsoleStore:
         supplied = dict(values or {})
         supplied.update(fields)
         normalized = self._target_values(supplied)
-        try:
-            with self._connection(immediate=True) as connection:
-                self._validate_target_telegram(connection, normalized)
-                if normalized["format_code"]:
-                    duplicate = connection.execute(
-                        """
-                        SELECT 1 FROM watch_targets
-                        WHERE company_code = ? AND site_no = ? AND movie_no = ?
-                          AND format_code = ?
-                        LIMIT 1
-                        """,
-                        (
-                            normalized["company_code"],
-                            normalized["site_no"],
-                            normalized["movie_no"],
-                            normalized["format_code"],
-                        ),
-                    ).fetchone()
-                    if duplicate is not None:
-                        raise ValueError("an equivalent target already exists")
-                target_id = self._insert_target(connection, normalized)
-                row = connection.execute(
-                    "SELECT * FROM watch_targets WHERE id = ?",
-                    (target_id,),
-                ).fetchone()
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("an equivalent target already exists") from exc
+        with self._connection(immediate=True) as connection:
+            self._validate_target_telegram(connection, normalized)
+            target_id = self._insert_target(connection, normalized)
+            row = connection.execute(
+                "SELECT * FROM watch_targets WHERE id = ?",
+                (target_id,),
+            ).fetchone()
         if row is None:  # pragma: no cover - lastrowid is selected in one transaction
             raise RuntimeError("target could not be created")
         return self._target_from_row(row)

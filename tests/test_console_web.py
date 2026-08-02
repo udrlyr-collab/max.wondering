@@ -205,11 +205,16 @@ def test_catalog_and_target_create_read_update_refresh(console_context) -> None:
         json=target_payload(),
         headers=headers,
     )
-    assert duplicate.status_code == 409
+    assert duplicate.status_code == 201
+    duplicate_target = duplicate.json()["target"]
+    assert duplicate_target["id"] != created["id"]
 
     bootstrap = client.get("/api/v1/bootstrap")
     assert bootstrap.status_code == 200
-    assert [item["id"] for item in bootstrap.json()["targets"]] == [created["id"]]
+    assert [item["id"] for item in bootstrap.json()["targets"]] == [
+        created["id"],
+        duplicate_target["id"],
+    ]
 
     updated_response = client.patch(
         f"/api/v1/targets/{created['id']}",

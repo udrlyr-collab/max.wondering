@@ -157,7 +157,7 @@ def test_create_refresh_due_and_target_runtime_state(store) -> None:
     assert failed["last_error"] == "CGV blocked"
 
 
-def test_same_movie_can_be_tracked_as_separate_exact_formats(store) -> None:
+def test_same_movie_and_format_can_be_tracked_as_separate_targets(store) -> None:
     normal = store.create_target(
         site_no="0013",
         site_name="용산아이파크몰",
@@ -186,16 +186,17 @@ def test_same_movie_can_be_tracked_as_separate_exact_formats(store) -> None:
         "CGV FORMAT",
     ]
 
-    with pytest.raises(ValueError, match="equivalent target"):
-        store.create_target(
-            site_no="0013",
-            site_name="용산아이파크몰",
-            movie_no="30001323",
-            movie_name="오디세이",
-            format_code="02",
-            format_keyword="renamed format",
-            screen_grade_code="",
-        )
+    duplicate = store.create_target(
+        site_no="0013",
+        site_name="용산아이파크몰",
+        movie_no="30001323",
+        movie_name="오디세이",
+        format_code="02",
+        format_keyword="CGV FORMAT",
+        screen_grade_code="",
+    )
+    assert duplicate["id"] != normal["id"]
+    assert duplicate["format_code"] == normal["format_code"]
 
 
 def test_first_poll_is_baseline_then_new_screening_is_notified_and_auto_tracked(
