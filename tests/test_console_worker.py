@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -741,3 +742,42 @@ def test_target_deleted_during_poll_is_a_normal_worker_cancellation(
     assert worker.process_target(target) is None
     assert store.get_target(target["id"]) is None
     assert store.due_targets() == []
+
+
+def test_worker_retries_after_transient_database_lock(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+
+    class ImmediateStopEvent:
+        stopped = False
+
+        def is_set(self) -> bool:
+            return self.stopped
+
+        def set(self) -> None:
+            self.stopped = True
+
+        def wait(self, _timeout: float) -> bool:
+            return self.stopped
+
+    stop_event = ImmediateStopEvent()
+    attempts = 0
+
+    def deliver_pending() -> tuple[int, int, int]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise sqlite3.OperationalError("database is locked")
+        stop_event.set()
+        return 0, 0, 0
+
+    monkeypatch.setattr(worker, "deliver_pending", deliver_pending)
+    monkeypatch.setattr(worker, "deliver_pending_web_push", lambda: (0, 0, 0))
+    monkeypatch.setattr(store, "due_targets", lambda **_kwargs: [])
+    monkeypatch.setattr(worker, "heartbeat", dict)
+
+    worker.run_forever(stop_event)  # type: ignore[arg-type]
+
+    assert attempts == 2

@@ -69,17 +69,23 @@ def test_sqlite_pragmas_health_and_explicit_connection_close(store) -> None:
     with store._connection() as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] >= 5000
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
 
     with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
         connection.execute("SELECT 1")
 
     assert store.health_check() == {
-        "quick_check": "ok",
+        "connection_check": "ok",
         "foreign_keys": True,
         "journal_mode": "wal",
-        "busy_timeout": 5000,
+        "busy_timeout": 30000,
     }
+
+    with store._connection(immediate=True) as writer:
+        writer.execute(
+            "INSERT INTO console_metadata(key, value) VALUES ('writer', 'active')"
+        )
+        assert store.health_check()["connection_check"] == "ok"
 
 
 def test_default_target_is_idempotent_and_target_update_is_versioned(store) -> None:
@@ -624,7 +630,13 @@ def test_metadata_persists_across_store_instances(tmp_path, encryption_key) -> N
 
     reopened = ConsoleStore(database, encryption_key)
     assert reopened.get_metadata("worker_id") == "worker-1"
-    assert reopened.health_check()["quick_check"] == "ok"
+    assert reopened.health_check()["connection_check"] == "ok"
+
+
+def test_store_can_skip_schema_initialization(tmp_path, encryption_key) -> None:
+    database = tmp_path / "read-only-health.sqlite3"
+    ConsoleStore(database, encryption_key, initialize=False)
+    assert not database.exists()
 
 
 def test_web_push_vapid_and_subscription_secrets_are_encrypted_and_persistent(

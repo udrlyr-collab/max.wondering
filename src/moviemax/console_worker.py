@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 from dataclasses import replace
@@ -400,25 +401,34 @@ class ConsoleWorker:
         self.seed()
         last_heartbeat = 0.0
         while not stop_event.is_set():
-            self.deliver_pending()
-            self.deliver_pending_web_push()
-            for target in self.store.due_targets(limit=10):
-                if stop_event.is_set():
-                    break
-                self.process_target(target)
+            try:
                 self.deliver_pending()
                 self.deliver_pending_web_push()
+                for target in self.store.due_targets(limit=10):
+                    if stop_event.is_set():
+                        break
+                    self.process_target(target)
+                    self.deliver_pending()
+                    self.deliver_pending_web_push()
 
-            if time.monotonic() - last_heartbeat >= 10:
-                self.heartbeat()
-                last_heartbeat = time.monotonic()
+                if time.monotonic() - last_heartbeat >= 10:
+                    self.heartbeat()
+                    last_heartbeat = time.monotonic()
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower():
+                    raise
+                logger.warning("SQLite was busy; worker cycle will retry: %s", exc)
             stop_event.wait(self.console_settings.worker_tick_seconds)
 
 
 def console_worker_health(settings: ConsoleSettings) -> dict[str, Any]:
     if not settings.database_path.is_file():
         raise RuntimeError("Console database is missing")
-    store = ConsoleStore(settings.database_path, settings.encryption_key)
+    store = ConsoleStore(
+        settings.database_path,
+        settings.encryption_key,
+        initialize=False,
+    )
     database = store.health_check()
     raw = store.get_metadata("console_worker_heartbeat")
     if raw is None:

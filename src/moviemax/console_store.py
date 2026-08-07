@@ -30,6 +30,7 @@ class StaleVersionError(RuntimeError):
 
 
 MAX_SEAT_CHANGE_THRESHOLD = (1 << 53) - 1
+SQLITE_BUSY_TIMEOUT_MS = 30_000
 
 
 def _now() -> str:
@@ -113,19 +114,29 @@ class ConsoleStore:
         "poll_jitter_seconds",
     }
 
-    def __init__(self, path: Path | str, encryption_key: str) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        encryption_key: str,
+        *,
+        initialize: bool = True,
+    ) -> None:
         try:
             self._fernet = Fernet(encryption_key.encode("ascii"))
         except (UnicodeEncodeError, ValueError) as exc:
             raise ValueError("encryption_key must be a valid Fernet key") from exc
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        if initialize:
+            self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=5)
+        connection = sqlite3.connect(
+            self.path,
+            timeout=SQLITE_BUSY_TIMEOUT_MS / 1000,
+        )
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
@@ -2986,10 +2997,13 @@ class ConsoleStore:
         return str(row["value"]) if row is not None else None
 
     def health_check(self) -> dict[str, Any]:
-        with self._connection(immediate=True) as connection:
-            quick_check = connection.execute("PRAGMA quick_check").fetchone()
-            if quick_check is None or quick_check[0] != "ok":
-                raise RuntimeError("SQLite quick_check failed")
+        # Container probes run frequently and must not scan the entire growing
+        # history database or reserve SQLite's single writer slot. Full
+        # integrity checks belong to maintenance and backup verification.
+        with self._connection() as connection:
+            connection_check = connection.execute("SELECT 1").fetchone()
+            if connection_check is None or int(connection_check[0]) != 1:
+                raise RuntimeError("SQLite connection check failed")
             foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
             journal_mode = str(
                 connection.execute("PRAGMA journal_mode").fetchone()[0]
@@ -2999,7 +3013,7 @@ class ConsoleStore:
                 raise RuntimeError("SQLite foreign keys are disabled")
             if journal_mode != "wal":
                 raise RuntimeError("SQLite WAL mode is disabled")
-            if busy_timeout < 5000:
+            if busy_timeout < SQLITE_BUSY_TIMEOUT_MS:
                 raise RuntimeError("SQLite busy timeout is too short")
             token_row = connection.execute(
                 "SELECT bot_token_ciphertext FROM telegram_config WHERE id = 1"
@@ -3061,9 +3075,8 @@ class ConsoleStore:
                         self._fernet.decrypt(bytes(subscription[column]))
             except InvalidToken as exc:
                 raise RuntimeError("Web Push subscription cannot be decrypted") from exc
-            connection.execute("SELECT 1")
         return {
-            "quick_check": "ok",
+            "connection_check": "ok",
             "foreign_keys": True,
             "journal_mode": journal_mode,
             "busy_timeout": busy_timeout,
