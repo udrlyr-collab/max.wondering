@@ -37,6 +37,18 @@ class FakeTargetCgvClient:
         self.schedule_calls.append((movie_no, screening_date))
         return self.schedules[screening_date]
 
+    def get_screening_rows(self, movie_no: str, screening_date: str) -> list:
+        self.schedule_calls.append((movie_no, screening_date))
+        return self.schedules[screening_date]
+
+    def parse_screening_rows(
+        self,
+        _movie_no: str,
+        _screening_date: str,
+        rows: list,
+    ) -> list:
+        return rows
+
 
 class FakeTelegramSender:
     sent: ClassVar[list[tuple[str, str, str]]] = []
@@ -153,6 +165,41 @@ def test_fetch_target_uses_target_specific_cgv_client(
         ("movie-2", "20260811"),
     ]
     assert configured.movie_name == "두 번째 영화"
+
+
+def test_fetch_targets_shares_cgv_requests_for_same_site_and_movie(
+    worker_context,
+    monkeypatch,
+) -> None:
+    _settings, _base, store, worker = worker_context
+    first = store.create_target(
+        site_no="0013",
+        site_name="용산아이파크몰",
+        movie_no="30001323",
+        movie_name="오디세이",
+        format_code="48",
+        format_keyword="IMAX LASER 2D",
+    )
+    second = store.create_target(
+        site_no="0013",
+        site_name="용산아이파크몰",
+        movie_no="30001323",
+        movie_name="오디세이",
+        format_code="48",
+        format_keyword="IMAX LASER 2D",
+    )
+    FakeTargetCgvClient.created_settings.clear()
+    FakeTargetCgvClient.date_calls.clear()
+    FakeTargetCgvClient.schedule_calls.clear()
+    FakeTargetCgvClient.schedules = {"20260810": [screening(free_seats=3)]}
+    monkeypatch.setattr("moviemax.console_worker.CgvClient", FakeTargetCgvClient)
+
+    fetched = worker.fetch_targets([first, second])
+
+    assert FakeTargetCgvClient.date_calls == ["30001323"]
+    assert FakeTargetCgvClient.schedule_calls == [("30001323", "20260810")]
+    assert fetched[first["id"]] == [screening(free_seats=3)]
+    assert fetched[second["id"]] == [screening(free_seats=3)]
 
 
 def test_worker_polling_creates_and_delivers_outbox_without_network(

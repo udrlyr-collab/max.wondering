@@ -90,12 +90,49 @@ class ConsoleWorker:
             screenings.extend(client.get_screenings(movie_no, screening_date))
         return screenings
 
-    def process_target(self, target: dict[str, Any]) -> dict[str, Any] | None:
+    def fetch_targets(
+        self,
+        targets: list[dict[str, Any]],
+    ) -> dict[int, list[Screening]]:
+        if not targets:
+            return {}
+        source = targets[0]
+        movie_no = str(source["movie_no"])
+        source_client = self._client_for_target(source)
+        dates = source_client.get_screening_dates(movie_no)
+        clients = {
+            int(target["id"]): self._client_for_target(target)
+            for target in targets
+        }
+        screenings = {target_id: [] for target_id in clients}
+        for index, screening_date in enumerate(dates):
+            if index and self.base_settings.request_gap_seconds:
+                time.sleep(self.base_settings.request_gap_seconds)
+            rows = source_client.get_screening_rows(movie_no, screening_date)
+            for target_id, client in clients.items():
+                screenings[target_id].extend(
+                    client.parse_screening_rows(movie_no, screening_date, rows)
+                )
+        return screenings
+
+    def process_target(
+        self,
+        target: dict[str, Any],
+        *,
+        prefetched_screenings: list[Screening] | None = None,
+        prefetch_error: Exception | None = None,
+    ) -> dict[str, Any] | None:
         target_id = int(target["id"])
         version = int(target["version"])
         try:
             self.store.mark_target_started(target_id, expected_version=version)
-            screenings = self.fetch_target(target)
+            if prefetch_error is not None:
+                raise prefetch_error
+            screenings = (
+                prefetched_screenings
+                if prefetched_screenings is not None
+                else self.fetch_target(target)
+            )
             summary = self.store.apply_snapshot(target_id, version, screenings)
             self.store.mark_target_success(target_id, expected_version=version)
             logger.info(
@@ -404,10 +441,32 @@ class ConsoleWorker:
             try:
                 self.deliver_pending()
                 self.deliver_pending_web_push()
+                groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
                 for target in self.store.due_targets(limit=10):
+                    key = (
+                        str(target["company_code"]),
+                        str(target["site_no"]),
+                        str(target["movie_no"]),
+                    )
+                    groups.setdefault(key, []).append(target)
+
+                for targets in groups.values():
                     if stop_event.is_set():
                         break
-                    self.process_target(target)
+                    if len(targets) == 1:
+                        self.process_target(targets[0])
+                    else:
+                        try:
+                            prefetched = self.fetch_targets(targets)
+                        except Exception as exc:  # noqa: BLE001 - shared poll failure
+                            for target in targets:
+                                self.process_target(target, prefetch_error=exc)
+                        else:
+                            for target in targets:
+                                self.process_target(
+                                    target,
+                                    prefetched_screenings=prefetched[int(target["id"])],
+                                )
                     self.deliver_pending()
                     self.deliver_pending_web_push()
 

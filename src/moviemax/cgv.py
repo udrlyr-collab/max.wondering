@@ -338,8 +338,16 @@ class CgvClient:
         return sorted(dates)
 
     def get_screenings(self, movie_no: str, screening_date: str) -> list[Screening]:
+        rows = self.get_screening_rows(movie_no, screening_date)
+        return self.parse_screening_rows(movie_no, screening_date, rows)
+
+    def get_screening_rows(
+        self,
+        movie_no: str,
+        screening_date: str,
+    ) -> list[dict[str, Any]]:
         site_no = _validated_site_no(self.settings.site_no)
-        rows = self._get_list(
+        return self._get_list(
             "/api/v1/booking/searchSchByMov",
             {
                 "coCd": self.settings.company_code,
@@ -349,6 +357,13 @@ class CgvClient:
                 "rtctlScopCd": "08",
             },
         )
+
+    def parse_screening_rows(
+        self,
+        movie_no: str,
+        screening_date: str,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> list[Screening]:
         screenings: list[Screening] = []
         for index, row in enumerate(rows):
             _validate_format_discriminators(row, index)
